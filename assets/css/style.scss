@@ -1,0 +1,285 @@
+---
+---
+
+@import "{{ site.theme }}";
+
+/* Custom styles for Hear Me Out */
+
+/* Hide the header completely */
+.site-header {
+  display: none !important;
+}
+
+/* Remove any top margins/padding that might create space */
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.page-content {
+  padding-top: 0 !important;
+}
+
+/* Main content styling */
+.page-content {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+  padding: 2rem 0 0 0; /* Remove bottom padding */
+}
+
+.wrapper {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 15px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  padding: 2rem;
+  margin: 2rem auto;
+  max-width: 1400px; /* Increased from 1200px */
+  width: 95%; /* Increased from 90% */
+}
+
+/* Typography */
+h1, h2, h3 {
+  color: #1a1a2e;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+}
+
+h1 {
+  background: linear-gradient(45deg, #667eea, #764ba2);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-align: center;
+  font-size: 2.5rem;
+  font-weight: 800;
+  margin-bottom: 0.5rem;
+}
+
+/* Links and buttons */
+a {
+  color: #667eea;
+  text-decoration: none;
+  transition: all 0.3s ease;
+}
+
+a:hover {
+  color: #764ba2;
+  text-decoration: underline;
+}
+
+/* Code blocks */
+pre, code {
+  background-color: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+}
+
+pre {
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+code {
+  padding: 0.2rem 0.4rem;
+  font-size: 87.5%;
+}
+
+/* Images and videos */
+img, video {
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+  margin: 1rem 0;
+}
+
+/* Feature list styling */
+ul li {
+  margin-bottom: 0.5rem;
+  line-height: 1.6;
+}
+
+ul li strong {
+  color: #1a1a2e;
+}
+
+/* Horizontal rules */
+hr {
+  border: none;
+  height: 2px;
+  background: linear-gradient(45deg, #667eea, #764ba2);
+  margin: 2rem 0;
+  border-radius: 2px;
+}
+
+/* Center aligned content */
+div[align="center"] {
+  text-align: center;
+  margin: 2rem 0;
+}
+
+/* Video container */
+video {
+  margin: 2rem auto;
+  display: block;
+}
+
+/* Footer styling */
+.site-footer {
+  background-color: #1a1a2e;
+  color: #eee;
+  border-top: 2px solid #16213e;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 2rem 0 !important;
+}
+
+.site-footer .wrapper {
+  max-width: 1400px !important;
+  width: 95% !important;
+  margin: 0 auto !important;
+}
+
+.site-footer a {
+  color: #667eea;
+}
+
+.site-footer a:hover {
+  color: #764ba2;
+}
+
+/* Bottom content section styling */
+.bottom-section {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 3rem 0;
+  margin: 2rem -2rem -2rem -2rem; /* Extend beyond wrapper padding */
+  border-radius: 0 0 15px 15px;
+  text-align: center;
+}
+
+.bottom-section h2, .bottom-section h3 {
+  color: white !important;
+  text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+
+.bottom-section a {
+  color: #fff !important;
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+.bottom-section a:hover {
+  color: #f0f0f0 !important;
+  text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+}
+
+/* Author and affiliation styling */
+.author-section {
+  text-align: center;
+  margin: 2rem 0;
+}
+
+.author-names {
+  color: #555;
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 1rem 0;
+}
+
+.affiliation-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin: 1rem 0;
+  flex-wrap: wrap;
+}
+
+.kth-logo {
+  height: 45px;
+  width: auto;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+}
+
+.affiliation-text {
+  color: #666;
+  font-style: italic;
+  margin: 0;
+  font-size: 1rem;
+}
+
+@media (max-width: 768px) {
+  .affiliation-container {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  
+  .kth-logo {
+    height: 35px;
+  }
+  
+  .author-names {
+    font-size: 1rem;
+  }
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .wrapper {
+    padding: 1rem;
+    margin: 1rem;
+    width: calc(100% - 2rem); /* Full width minus margins on mobile */
+    max-width: none;
+  }
+  
+  h1 {
+    font-size: 2rem;
+  }
+  
+  video {
+    width: 100%;
+  }
+}
+
+/* Medium screens - tablets */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .wrapper {
+    width: 85%;
+    max-width: 1000px;
+  }
+}
+
+/* Large screens */
+@media (min-width: 1025px) {
+  .wrapper {
+    width: 95%;
+    max-width: 1400px;
+  }
+}
+
+/* Special styling for call-to-action buttons */
+a[href*="modal.run"] {
+  display: inline-block;
+  background: linear-gradient(45deg, #667eea, #764ba2);
+  color: white !important;
+  padding: 12px 24px;
+  border-radius: 25px;
+  font-weight: 600;
+  text-decoration: none !important;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+  transition: all 0.3s ease;
+  margin: 0.5rem;
+}
+
+a[href*="modal.run"]:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+  color: white !important;
+}
+
+/* Emoji spacing */
+.emoji {
+  margin-right: 0.5rem;
+}
