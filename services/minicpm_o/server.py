@@ -465,9 +465,25 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
         finally:
             worker_stop.set()
             stop.set()
-            await worker_fut
-            await poller
-            await loop.run_in_executor(None, omni.break_, "disconnect")
+            # break_ FIRST: the worker thread may be blocked inside omni.decode()'s
+            # SSE request (it only checks worker_stop between chunks), so interrupt the
+            # in-flight decode server-side so the thread can return. This whole session
+            # holds _session_lock, so if cleanup hangs the next connection can never get
+            # the lock and the frontend sticks on "connecting". Bound every await too.
+            try:
+                await loop.run_in_executor(None, omni.break_, "disconnect")
+            except Exception as e:
+                logger.warning("[chat] break on disconnect failed: %s", e)
+            try:
+                await asyncio.wait_for(asyncio.shield(worker_fut), timeout=10)
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("[chat] worker did not stop in time")
+            if not poller.done():
+                poller.cancel()
+            try:
+                await poller
+            except (asyncio.CancelledError, Exception):
+                pass
             if not ws.closed:
                 await ws.close()
 
