@@ -73,6 +73,14 @@ CTX_SIZE = int(os.environ.get("MINICPM_O_CTX", "32768"))  # official cpp_backend
 # duplex KV cache grows over the whole conversation and is never trimmed, so too small a ctx
 # fills after ~2 turns of (heavy) audio tokens and the model sticks in is_listen=True forever.
 N_GPU_LAYERS = int(os.environ.get("MINICPM_O_NGL", "99"))
+# Per-chunk speak-token budget. The C++ engine's duplex default is 26 (~1.0s of audio per
+# chunk), chosen for snappy barge-in -- but the LLM emits text faster than that, so long
+# replies end (text done) with most of the speech never synthesized = the "missing audio on
+# long turns". It's a MAX (the model still stops at <|chunk_tts_eos|> on short phrases), so
+# raising it just lets Token2Wav finish longer phrases; the cost is the model commits to more
+# tokens before checking for interruption, so barge-in gets a bit less responsive. 0 = leave
+# the engine default.
+MAX_SPEAK_TOKENS = int(os.environ.get("MINICPM_O_MAX_SPEAK_TOKENS", "75"))
 LENGTH_PENALTY = float(os.environ.get("MINICPM_O_LENGTH_PENALTY", "1.1"))
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -160,7 +168,7 @@ class LlamaOmni:
                     f.write(line)
                     f.flush()
                     s = line.rstrip()
-                    if any(k in s.lower() for k in ("error", "fail", "cannot", "abort", "assert", "cuda")):
+                    if any(k in s.lower() for k in ("error", "fail", "cannot", "abort", "assert", "cuda", "speak_tokens")):
                         logger.warning("[llama-server] %s", s)
                     else:
                         logger.debug("[llama-server] %s", s)
@@ -190,6 +198,8 @@ class LlamaOmni:
             "voice_clone_prompt": prompts["voice_clone_prompt"],
             "assistant_prompt": prompts["assistant_prompt"],
         }
+        if MAX_SPEAK_TOKENS > 0:
+            body["max_new_speak_tokens_per_chunk"] = MAX_SPEAK_TOKENS
         if os.path.exists(REF_AUDIO_PATH):
             body["voice_audio"] = REF_AUDIO_PATH
         r = requests.post(f"{self.url}/v1/stream/omni_init", json=body, timeout=120, proxies=_NO_PROXY)

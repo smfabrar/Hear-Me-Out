@@ -100,6 +100,10 @@ if [ "$SPEECH_LM_ENGINE" = "minicpm_o" ]; then
     # small ctx fills after ~2 turns of audio tokens and the model wedges in listen mode.
     # ~4.6GB KV at Q4 — still fits on the 24GB card alongside TTS + X-VC.
     export MINICPM_O_CTX="${MINICPM_O_CTX:-32768}"
+    # Per-chunk speak-token budget. Engine duplex default 26 (~1s audio/chunk) clips long
+    # replies (text outruns speech). 75 (~3s) lets Token2Wav finish phrases; lower it for
+    # snappier barge-in, raise it if long sentences still get cut.
+    export MINICPM_O_MAX_SPEAK_TOKENS="${MINICPM_O_MAX_SPEAK_TOKENS:-75}"
     export MINICPM_REF_AUDIO="${MINICPM_REF_AUDIO:-$HEARMEOUT_DIR/recordings/Target_2.wav}"
     export MINICPM_O_OUTPUT_DIR="${MINICPM_O_OUTPUT_DIR:-$SERVICES/minicpm_o/_omni_out}"
     # llama-server (CUDA build) needs its cudart at runtime — and it MUST match the toolkit
