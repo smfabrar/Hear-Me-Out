@@ -94,14 +94,28 @@ TEMP_DIR = os.path.join(OUTPUT_DIR, "_in")
 
 _NO_PROXY = {"http": None, "https": None}
 
+# Gentle brevity nudge appended to the system prompt. The model defaults to long monologues,
+# which both read worse and strain the duplex pipeline (text outruns the per-chunk audio budget,
+# so very long turns lag). This is a soft instruction, not a hard cap -- it can still go long
+# when the question genuinely needs it. Set MINICPM_O_STYLE_HINT="" to disable, or override it.
+STYLE_HINT = os.environ.get(
+    "MINICPM_O_STYLE_HINT",
+    " Keep your replies short and natural -- usually one to three sentences -- and let the "
+    "conversation go back and forth rather than giving long monologues. Add more detail only "
+    "when the user asks for it.",
+)
+
 
 def build_prompts(text_prompt: str) -> dict:
     """Two-part duplex system prompt (cpp_backend.py _build_prompts_from_content).
 
     The frontend's text_prompt is the `before` (system) text; duplex puts no text
-    after the audio prompt. Falls back to the project's default if empty.
+    after the audio prompt. Falls back to the project's default if empty. A brevity
+    STYLE_HINT is appended (unless disabled) so replies stay conversational.
     """
     before = (text_prompt or "").strip() or "Streaming Duplex Conversation! You are a helpful assistant."
+    if STYLE_HINT.strip():
+        before = before.rstrip() + " " + STYLE_HINT.strip()
     return {
         "voice_clone_prompt": f"<|im_start|>system\n{before}\n<|audio_start|>",
         "assistant_prompt": "<|audio_end|><|im_end|>\n",
