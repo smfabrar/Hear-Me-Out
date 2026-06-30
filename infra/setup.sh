@@ -254,14 +254,15 @@ phase_models() {
     echo "WARN: HF_TOKEN not set — skipping gated PersonaPlex model."
   fi
   # MiniCPM-o 4.5 GGUF (public) — the alternative :8000 speech LM, run by llama.cpp-omni.
-  # Audio-only subset (~7.8GB): LLM Q4_K_M + audio/ + tts/ + token2wav-gguf/ (skip vision/).
-  # Downloaded via app_api's venv (it has huggingface_hub; minicpm_o's venv is torch-free).
-  if [ ! -f "$MO_GGUF_DIR/MiniCPM-o-4_5-Q4_K_M.gguf" ]; then
-    echo "Downloading MiniCPM-o 4.5 GGUF subset (~7.8GB)..."
+  # Need LLM Q4_K_M + audio/ + tts/ + token2wav-gguf/ + vision/ — llama-omni-server's
+  # omni_init loads the vision model unconditionally, so include it (skipping it makes the
+  # engine error 'failed to load vision model' every boot). Downloaded via app_api's venv.
+  if [ ! -f "$MO_GGUF_DIR/vision/MiniCPM-o-4_5-vision-F16.gguf" ]; then
+    echo "Downloading MiniCPM-o 4.5 GGUF (~9GB)..."
     uv run --project "$SERVICES/app_api" python -c "
 from huggingface_hub import snapshot_download
 snapshot_download('openbmb/MiniCPM-o-4_5-gguf', local_dir='$MO_GGUF_DIR',
-    allow_patterns=['MiniCPM-o-4_5-Q4_K_M.gguf','audio/*','tts/*','token2wav-gguf/*'])
+    allow_patterns=['MiniCPM-o-4_5-Q4_K_M.gguf','audio/*','tts/*','token2wav-gguf/*','vision/*'])
 print('MiniCPM-o GGUF ready.')" \
       || echo "WARN: MiniCPM-o GGUF download failed; rerun or fetch openbmb/MiniCPM-o-4_5-gguf manually."
   else echo "MiniCPM-o GGUF present."; fi
