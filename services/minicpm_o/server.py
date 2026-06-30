@@ -108,7 +108,6 @@ class LlamaOmni:
         self.proc: subprocess.Popen | None = None
         self.cnt = 0
         self.sent_wavs: set[str] = set()
-        self._wav_stat: dict[str, tuple[int, int]] = {}  # key -> last (size, mtime_ns), to detect still-writing wavs
         self.cur_prompt: str | None = None
         self._cpp_log_path = os.path.join(OUTPUT_DIR, "llama-server.log")
         os.makedirs(TEMP_DIR, exist_ok=True)
@@ -204,7 +203,6 @@ class LlamaOmni:
         self._reset_output()
         self.cnt = 0
         self.sent_wavs = set()
-        self._wav_stat = {}
         if self.proc is None or self.proc.poll() is not None:
             self.start_server()
             self.omni_init(text_prompt)
@@ -267,16 +265,10 @@ class LlamaOmni:
                     texts.append(ev["content"])
         return "".join(texts), is_listen
 
-    def collect_new_audio(self, final: bool = False) -> np.ndarray | None:
+    def collect_new_audio(self) -> np.ndarray | None:
         """Scan for new wav_N.wav (24k float32) and concat. The C++ server writes either to
         <output_dir>/tts_wav/ (duplex) or per-round <output_dir>/round_NNN/tts_wav/, so we
-        scan both. Sent files are tracked by full path.
-
-        Token2Wav writes each wav INCREMENTALLY, so a file seen mid-write would read back
-        truncated and then be marked sent forever (= the missing tail / last sentence). We
-        therefore only read a wav once its (size, mtime) is STABLE across two polls; a file
-        still growing is deferred to the next poll. `final=True` (session drain) bypasses the
-        stability gate and reads whatever remains."""
+        scan both. Sent files are tracked by full path."""
         dirs = []
         direct = os.path.join(OUTPUT_DIR, "tts_wav")
         if os.path.isdir(direct):
@@ -299,16 +291,6 @@ class LlamaOmni:
                 key = os.path.join(d, f)
                 if key in self.sent_wavs:
                     continue
-                if not final:
-                    try:
-                        st = os.stat(key)
-                    except OSError:
-                        continue
-                    sig = (st.st_size, st.st_mtime_ns)
-                    if self._wav_stat.get(key) != sig:
-                        # first sighting, or still being written — wait for it to settle
-                        self._wav_stat[key] = sig
-                        continue
                 try:
                     data, _sr = sf.read(key, dtype="float32")
                     if len(data):
@@ -316,7 +298,6 @@ class LlamaOmni:
                             data = data.mean(axis=1)
                         chunks.append(data)
                     self.sent_wavs.add(key)
-                    self._wav_stat.pop(key, None)
                 except Exception as e:
                     logger.warning("[audio] read %s failed: %s", key, e)
         if chunks:
@@ -471,8 +452,7 @@ async def handle_chat(request: web.Request) -> web.WebSocketResponse:
                     await asyncio.wait_for(stop.wait(), timeout=0.1)
                 except asyncio.TimeoutError:
                     pass
-            await asyncio.sleep(0.2)  # let Token2Wav finish any in-flight wav
-            audio = await loop.run_in_executor(None, lambda: omni.collect_new_audio(final=True))  # final drain
+            audio = await loop.run_in_executor(None, omni.collect_new_audio)  # final drain
             if audio is not None and len(audio):
                 await send_opus(audio)
             if len(out_pcm_buf):
