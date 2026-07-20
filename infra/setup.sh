@@ -74,7 +74,7 @@ echo
 
 # Workspace defaults to the current directory — cd into your target folder first.
 WORKSPACE="${WORKSPACE:-$(pwd)}"
-REPO_URL="${REPO_URL:-https://github.com/syedfahimabrar/Hear-Me-Out.git}"
+REPO_URL="${REPO_URL:-https://github.com/smfabrar/Hear-Me-Out.git}"
 
 ask        WORKSPACE "Workspace directory" "$WORKSPACE"
 ask        REPO_URL  "Git repo URL"        "$REPO_URL"
