@@ -1,10 +1,10 @@
 import { useState } from "react"
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@shared/ui/tabs"
 import { ConversationView } from "@/components/ConversationView"
 import { VoiceConversion } from "@/components/VoiceConversion"
 import { MetricsComparison } from "@/components/MetricsComparison"
-import { useRecorder } from "@/hooks/useRecorder"
-import { useWebSocket } from "@/hooks/useWebSocket"
+import { useRecorder } from "@shared/hooks/useRecorder"
+import { useWebSocket } from "@shared/hooks/useWebSocket"
 import { ThemeToggle } from "@/components/ThemeToggle"
 import { Mic, GitCompare, Wand2 } from "lucide-react"
 

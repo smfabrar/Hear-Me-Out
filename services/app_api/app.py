@@ -86,6 +86,22 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+class SPAStaticFiles(StaticFiles):
+    """Static files with SPA fallback: unknown non-file paths (e.g. /admin) serve
+    index.html so client-side routing and hard refreshes work. Real assets and the
+    API routes (declared before this mount) are unaffected."""
+
+    async def get_response(self, path, scope):
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as e:
+            if e.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
 def create_app():
     app = FastAPI()
 
@@ -111,6 +127,14 @@ def create_app():
     @app.get("/api/health")
     async def health_check():
         return JSONResponse({"status": "healthy", "service": "vc-api"})
+
+    # In study mode, mount the participant-experiment API (admin + participant
+    # endpoints, SQLite storage, VC-engine prepare lifecycle). HMO mode is unaffected.
+    if os.environ.get("APP_MODE", "hmo").lower() == "study":
+        from study import build_study_router
+
+        app.include_router(build_study_router())
+        logger.info("APP_MODE=study: study router mounted")
 
     @app.post("/api/transcribe")
     async def transcribe_audio(audio: UploadFile = File(...)):
@@ -392,8 +416,8 @@ def create_app():
         logger.info(f"Serving recording file: {file_path}")
         return FileResponse(file_path, media_type="audio/wav")
 
-    # Serve static frontend files
-    app.mount("/", StaticFiles(directory=str(STATIC_PATH), html=True))
+    # Serve static frontend files (with SPA fallback for client-side routes).
+    app.mount("/", SPAStaticFiles(directory=str(STATIC_PATH), html=True))
 
     return app
 

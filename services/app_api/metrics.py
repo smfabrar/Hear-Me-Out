@@ -259,7 +259,10 @@ def analyze_voices(audio_path_a, audio_path_b):
         "response_a": metrics_a,
         "response_b": metrics_b,
         "comparison": comparison_metrics,
-        "aesthetics": aesthetic_metrics
+        "aesthetics": aesthetic_metrics,
+        # False => aesthetics are placeholder/mock values (audiobox not installed);
+        # the study saver records this so mock aesthetics aren't analyzed as real.
+        "audiobox_available": AUDIOBOX_AVAILABLE,
     }
 
 def create_comprehensive_metrics_plot(metrics_data, save_path='metrics_comparison.png'):

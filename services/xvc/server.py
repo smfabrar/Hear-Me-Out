@@ -239,6 +239,25 @@ async def handle_stream(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+STUDY_APP_API_URL = os.environ.get("STUDY_APP_API_URL", "https://127.0.0.1:5001")
+
+
+async def resolve_study_condition(session_id: str):
+    """Study mode: resolve an opaque session_id to its hidden condition via app-api
+    over localhost. Returns None if unavailable. (Same contract as MeanVC.)"""
+    url = f"{STUDY_APP_API_URL}/api/study/condition/{session_id}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, ssl=False, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    logger.error(f"[xvc proxy] condition resolve HTTP {r.status} for {session_id}")
+                    return None
+                return await r.json()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[xvc proxy] condition resolve failed: {e}")
+        return None
+
+
 async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
     """GET /api/meanvc/chat-proxy - server-side VC bridge to PersonaPlex.
 
@@ -251,17 +270,35 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
     source_sr = int(request.query.get("source_sr", SR))
     voice_prompt = request.query.get("voice_prompt", "")
     text_prompt = request.query.get("text_prompt", "")
+    session_id = request.query.get("session_id", "")
+    voice_mode = "vc"
     resampler = _maybe_resampler(source_sr)
 
     browser_ws = web.WebSocketResponse()
     await browser_ws.prepare(request)
-    if target_id not in targets:
-        await browser_ws.send_json({"error": f"Unknown target_id: {target_id}"})
-        await browser_ws.close()
-        return browser_ws
 
-    spk, frame = targets[target_id]
-    session = XVCStreamSession(spk, frame)
+    # Study mode: resolve the hidden prompt/target from app-api via opaque session_id.
+    if session_id:
+        cond = await resolve_study_condition(session_id)
+        if cond is None:
+            await browser_ws.send_json({"error": "Unknown or unresolved session"})
+            await browser_ws.close()
+            return browser_ws
+        voice_mode = cond.get("voice_mode", "vc")
+        text_prompt = cond.get("text_prompt", "")
+        voice_prompt = cond.get("voice_prompt") or voice_prompt
+        if voice_mode == "vc":
+            target_id = cond.get("engine_target_id") or ""
+
+    # 'natural' pass-through: no target/session, mic audio forwarded unmodified.
+    session = None
+    if voice_mode == "vc":
+        if target_id not in targets:
+            await browser_ws.send_json({"error": f"Unknown target_id: {target_id}"})
+            await browser_ws.close()
+            return browser_ws
+        spk, frame = targets[target_id]
+        session = XVCStreamSession(spk, frame)
     loop = asyncio.get_event_loop()
 
     # X-VC outputs 16 kHz; sphn's Opus encoder only accepts 24/48 kHz (PersonaPlex
@@ -298,11 +335,15 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
                 incoming = np.frombuffer(msg.data, dtype=np.float32).copy()
                 if resampler is not None:
                     incoming = resampler(torch.from_numpy(incoming).unsqueeze(0)).squeeze(0).numpy()
-                try:
-                    curs = await loop.run_in_executor(None, session.feed, incoming)
-                except Exception as e:
-                    logger.error(f"[xvc proxy] inference error: {e}")
-                    continue
+                if session is None:
+                    # Natural pass-through: forward the raw mic window unmodified.
+                    curs = [incoming]
+                else:
+                    try:
+                        curs = await loop.run_in_executor(None, session.feed, incoming)
+                    except Exception as e:
+                        logger.error(f"[xvc proxy] inference error: {e}")
+                        continue
 
                 for cur in curs:
                     chunk_count += 1
