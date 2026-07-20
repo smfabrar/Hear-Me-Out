@@ -1,0 +1,97 @@
+import { useCallback, useEffect, useRef, useState } from "react"
+import { useWebSocket } from "@shared/hooks/useWebSocket"
+import { useMeanVCPipeline } from "@shared/hooks/useMeanVCPipeline"
+import { transcribeWavBlob, compareMetricsData } from "@shared/services/api"
+import { mergeAudioTracks } from "@shared/services/audioMerge"
+import { getStudyChatProxyWsUrl } from "@/lib/config"
+
+export interface SessionArtifacts {
+  participant: Blob | null       // converted (or pass-through for natural) user voice
+  participant_raw: Blob | null   // raw mic
+  model: Blob | null             // PersonaPlex audio
+  merged: Blob | null
+  transcript: unknown
+  metrics: unknown
+  audiobox_available: boolean
+}
+
+export type CallStatus = "idle" | "connecting" | "active" | "processing" | "error"
+
+// Drives the shared voice engine for one scenario call. The browser passes only
+// an opaque session_id; the VC engine resolves the hidden prompt/target/steps.
+export function useStudyConversation() {
+  const ws = useWebSocket()
+  const vc = useMeanVCPipeline((d) => ws.sendRawAudio(d), 8)
+  const [status, setStatus] = useState<CallStatus>("idle")
+  const streamingRef = useRef(false)
+
+  // Start sending mic audio once PersonaPlex's handshake arrives via the proxy.
+  useEffect(() => {
+    if (ws.handshakeReceived && streamingRef.current) {
+      vc.beginSending()
+      setStatus("active")
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws.handshakeReceived])
+
+  const start = useCallback(async (sessionId: string) => {
+    setStatus("connecting")
+    ws.clearTranscripts()
+    streamingRef.current = true
+    try {
+      const proxy = await vc.startMic("session") // dummy target; proxy uses session_id
+      ws.connect(getStudyChatProxyWsUrl(sessionId, proxy.sourceSr))
+    } catch (e) {
+      streamingRef.current = false
+      setStatus("error")
+      throw e
+    }
+  }, [ws, vc])
+
+  const stopAndAssemble = useCallback(async (): Promise<SessionArtifacts> => {
+    streamingRef.current = false
+    setStatus("processing")
+    vc.stopVCStream()
+    ws.disconnect()
+
+    const vcWav = ws.getVcUserWav()
+    const rawWav = vc.getOriginalUserWav()
+    const modelWav = await ws.getPersonaplexWav()
+
+    let merged: Blob | null = null
+    if (vcWav && modelWav) {
+      try { merged = await mergeAudioTracks(vcWav, modelWav) } catch { merged = null }
+    }
+
+    let participantSegs: unknown = null
+    if (vcWav) {
+      try { participantSegs = (await transcribeWavBlob(vcWav)).segments } catch { participantSegs = null }
+    }
+    const transcript = { participant: participantSegs, model: ws.transcripts }
+
+    let metrics: unknown = null
+    let audiobox = false
+    if (rawWav && vcWav) {
+      try {
+        metrics = await compareMetricsData(rawWav, vcWav)
+        audiobox = !!(metrics as any)?.audiobox_available
+      } catch { metrics = null }
+    }
+
+    setStatus("idle")
+    return {
+      participant: vcWav, participant_raw: rawWav, model: modelWav, merged,
+      transcript, metrics, audiobox_available: audiobox,
+    }
+  }, [ws, vc])
+
+  return {
+    status,
+    connected: ws.connected,
+    warmupComplete: ws.warmupComplete,
+    handshakeReceived: ws.handshakeReceived,
+    error: ws.error,
+    start,
+    stopAndAssemble,
+  }
+}

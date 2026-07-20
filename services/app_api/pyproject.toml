@@ -13,6 +13,7 @@ dependencies = [
     "starlette",
     "websockets",
     "werkzeug",
+    "requests",  # study engine-manager → VC engine load-target / health
     # transcription + VAD
     "faster-whisper==1.2.1",
     "silero-vad",

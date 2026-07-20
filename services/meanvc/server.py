@@ -483,6 +483,28 @@ def _save_wav(path: str, pcm: np.ndarray, sr: int) -> None:
         w.writeframes(ints.tobytes())
 
 
+# app-api base URL for study-mode condition resolution (the study platform hides
+# the system prompt + VC target from the browser; the proxy fetches them here).
+STUDY_APP_API_URL = os.environ.get("STUDY_APP_API_URL", "https://127.0.0.1:5001")
+
+
+async def resolve_study_condition(session_id: str):
+    """Study mode: resolve an opaque session_id to its hidden condition
+    (text_prompt / voice_prompt / engine_target_id / steps / voice_mode) via
+    app-api over localhost. Returns None if unavailable."""
+    url = f"{STUDY_APP_API_URL}/api/study/condition/{session_id}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, ssl=False, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    logger.error(f"[proxy] condition resolve HTTP {r.status} for {session_id}")
+                    return None
+                return await r.json()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[proxy] condition resolve failed: {e}")
+        return None
+
+
 async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
     """WebSocket /api/meanvc/chat-proxy - server-side VC bridge to PersonaPlex.
 
@@ -499,7 +521,28 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
     source_sr = int(request.query.get("source_sr", 16000))
     voice_prompt = request.query.get("voice_prompt", "")
     text_prompt = request.query.get("text_prompt", "")
+    session_id = request.query.get("session_id", "")
+    voice_mode = "vc"
     need_resample = source_sr != 16000
+
+    browser_ws = web.WebSocketResponse()
+    await browser_ws.prepare(request)
+
+    # Study mode: the browser passes only an opaque session_id. Resolve the hidden
+    # prompt/target/steps server-side so participants never see them. Works the
+    # same for both VC engines (identical route surface).
+    if session_id:
+        cond = await resolve_study_condition(session_id)
+        if cond is None:
+            await browser_ws.send_json({"error": "Unknown or unresolved session"})
+            await browser_ws.close()
+            return browser_ws
+        voice_mode = cond.get("voice_mode", "vc")
+        text_prompt = cond.get("text_prompt", "")
+        voice_prompt = cond.get("voice_prompt") or voice_prompt
+        steps = int(cond.get("steps") or steps)
+        if voice_mode == "vc":
+            target_id = cond.get("engine_target_id") or ""
 
     if need_resample:
         import torchaudio
@@ -509,18 +552,22 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
         ).to("cpu")
         logger.info(f"[proxy] Resampling enabled: {source_sr}Hz -> 16000Hz")
 
-    browser_ws = web.WebSocketResponse()
-    await browser_ws.prepare(request)
+    # 'natural' condition: no VC target/session — the mic audio is forwarded to
+    # PersonaPlex unmodified (the proxy still hides the prompt). Otherwise set up
+    # the MeanVC inference session for the resolved target.
+    session = None
+    if voice_mode == "vc":
+        if target_id not in targets:
+            await browser_ws.send_json({"error": f"Unknown target_id: {target_id}"})
+            await browser_ws.close()
+            return browser_ws
+        with targets_lock:
+            spk_emb, prompt_mel = targets[target_id]
+        session = InferenceSession(models, spk_emb, prompt_mel, steps=steps)
 
-    if target_id not in targets:
-        await browser_ws.send_json({"error": f"Unknown target_id: {target_id}"})
-        await browser_ws.close()
-        return browser_ws
-
-    with targets_lock:
-        spk_emb, prompt_mel = targets[target_id]
-
-    session = InferenceSession(models, spk_emb, prompt_mel, steps=steps)
+    # Chunk size for buffering mic PCM: MeanVC's native chunk in VC mode, a fixed
+    # 0.1 s window in natural pass-through.
+    CHUNK = session.CHUNK if session is not None else 1600
     # MeanVC outputs 16 kHz, but sphn's Opus encoder only accepts 24 kHz / 48 kHz
     # (PersonaPlex itself uses 24 kHz = its mimi rate). So encode at 24 kHz and
     # resample the converted audio up before feeding the encoder.
@@ -568,34 +615,38 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
                     incoming = resampler(t).squeeze(0).numpy()
                 acc_samples = np.concatenate([acc_samples, incoming])
 
-                while len(acc_samples) >= session.CHUNK:
-                    chunk = acc_samples[: session.CHUNK]
-                    acc_samples = acc_samples[session.CHUNK :]
+                while len(acc_samples) >= CHUNK:
+                    chunk = acc_samples[:CHUNK]
+                    acc_samples = acc_samples[CHUNK:]
                     chunk_count += 1
 
-                    if chunk_count == 1:
-                        # First chunk is warmup padding; produce but don't forward.
-                        chunk = np.concatenate(
-                            [chunk, np.zeros(720, dtype=np.float32)]
-                        )
-                        await loop.run_in_executor(
-                            None, session.inference_one_chunk, chunk
-                        )
-                        continue
+                    if session is None:
+                        # Natural pass-through: forward the raw mic chunk as-is.
+                        vc_wav = chunk
+                    else:
+                        if chunk_count == 1:
+                            # First chunk is warmup padding; produce but don't forward.
+                            chunk = np.concatenate(
+                                [chunk, np.zeros(720, dtype=np.float32)]
+                            )
+                            await loop.run_in_executor(
+                                None, session.inference_one_chunk, chunk
+                            )
+                            continue
 
-                    # Periodically realign the streaming offsets (matches the
-                    # reference run_rt.py). Without this, asr/vc offsets grow
-                    # unbounded and quality drifts over a long conversation.
-                    if chunk_count % 50 == 0:
-                        session.reset_cache()
+                        # Periodically realign the streaming offsets (matches the
+                        # reference run_rt.py). Without this, asr/vc offsets grow
+                        # unbounded and quality drifts over a long conversation.
+                        if chunk_count % 50 == 0:
+                            session.reset_cache()
 
-                    try:
-                        vc_wav = await loop.run_in_executor(
-                            None, session.inference_one_chunk, chunk
-                        )
-                    except Exception as e:
-                        logger.error(f"[proxy] Inference error chunk {chunk_count}: {e}")
-                        continue
+                        try:
+                            vc_wav = await loop.run_in_executor(
+                                None, session.inference_one_chunk, chunk
+                            )
+                        except Exception as e:
+                            logger.error(f"[proxy] Inference error chunk {chunk_count}: {e}")
+                            continue
 
                     # (a) forward converted audio to PersonaPlex as Opus.
                     # sphn encodes at 24 kHz, so upsample the 16 kHz VC output,

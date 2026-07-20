@@ -1,15 +1,16 @@
 import { useState, useRef, useEffect } from "react"
-import { Card, CardContent } from "@/components/ui/card"
-import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
-import { useMeanVCPipeline } from "@/hooks/useMeanVCPipeline"
+import { Card, CardContent } from "@shared/ui/card"
+import { Empty, EmptyHeader, EmptyTitle } from "@shared/ui/empty"
+import { useMeanVCPipeline } from "@shared/hooks/useMeanVCPipeline"
 import { useConversation } from "@/hooks/useConversation"
 import { ControlPanel } from "@/components/conversation/ControlPanel"
 import { MessageFeed } from "@/components/conversation/MessageFeed"
 import { DownloadBar } from "@/components/conversation/DownloadBar"
 import { DownloadBarSkeleton } from "@/components/conversation/DownloadBarSkeleton"
 import { VoiceMetricsModal } from "@/components/conversation/VoiceMetricsModal"
-import type { useWebSocket } from "@/hooks/useWebSocket"
-import type { useRecorder } from "@/hooks/useRecorder"
+import type { useWebSocket } from "@shared/hooks/useWebSocket"
+import type { useRecorder } from "@shared/hooks/useRecorder"
+import { getMeanvcLoadTargetUrl } from "@/lib/config"
 
 type WsState = ReturnType<typeof useWebSocket>
 type RecorderState = ReturnType<typeof useRecorder>
@@ -21,7 +22,7 @@ interface Props {
 
 export function ConversationView({ ws, recorder }: Props) {
   const [meanvcSteps, setMeanvcSteps] = useState(2)
-  const vcPipeline = useMeanVCPipeline((data) => ws.sendRawAudio(data), meanvcSteps)
+  const vcPipeline = useMeanVCPipeline((data) => ws.sendRawAudio(data), meanvcSteps, { loadTargetUrl: getMeanvcLoadTargetUrl })
 
   // Audio output routing + live monitor of the converted voice (VC area only).
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([])
