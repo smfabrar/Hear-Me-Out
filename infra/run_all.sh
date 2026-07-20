@@ -75,13 +75,23 @@ if [ -z "$SPEECH_LM_ENGINE" ]; then
 fi
 
 # Pick the voice-conversion engine (only one runs on :5002).
+# In study mode the engine is NOT started at boot (the participant prepare step
+# starts it on demand), so don't prompt here — default meanvc, override with
+# VC_ENGINE=xvc in the environment.
 if [ -z "$VC_ENGINE" ]; then
-  echo ""
-  echo "  Which voice-conversion engine on :5002?"
-  echo "    1) MeanVC  (CPU, streaming) [default]"
-  echo "    2) X-VC    (GPU, streaming; needs the X-VC install from setup.sh)"
-  read -t 60 -p "  Choice [1/2]: " vc_choice < /dev/tty 2>/dev/tty || vc_choice="1"
-  case "$vc_choice" in 2) VC_ENGINE=xvc ;; *) VC_ENGINE=meanvc ;; esac
+  if [ "$APP_MODE" = "study" ]; then
+    VC_ENGINE=meanvc
+  else
+    echo ""
+    echo "  Which voice-conversion engine on :5002?"
+    echo "    1) MeanVC  (CPU, streaming) [default]"
+    echo "    2) X-VC    (GPU, streaming; needs the X-VC install from setup.sh)"
+    read -t 60 -p "  Choice [1/2]: " vc_choice < /dev/tty 2>/dev/tty || vc_choice="1"
+    case "$vc_choice" in 2) VC_ENGINE=xvc ;; *) VC_ENGINE=meanvc ;; esac
+  fi
+fi
+if [ "$APP_MODE" = "study" ]; then
+  echo -e "  ${DIM}vc engine${NC}  $VC_ENGINE  ${DIM}(starts on participant run; override with VC_ENGINE=xvc)${NC}"
 fi
 
 export HF_HUB_ENABLE_HF_TRANSFER=1
