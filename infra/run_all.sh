@@ -62,6 +62,13 @@ if [ ! -d "$FRONTEND_PATH" ]; then
     echo -e "  ${DIM}frontend${NC}   dist missing — building ($APP_MODE)..."
     APP_MODE="$APP_MODE" bash "$HEARMEOUT_DIR/infra/build-frontend.sh" || echo -e "  ${YELLOW}WARN:${NC} frontend build failed"
 fi
+# Fail clearly here rather than let app-api crash later on a missing static dir.
+if [ ! -d "$FRONTEND_PATH" ]; then
+    echo -e "  ${YELLOW}ERROR:${NC} $FRONTEND_PATH not found after build."
+    echo -e "         Build it explicitly:  ${BOLD}APP_MODE=$APP_MODE bash infra/build-frontend.sh${NC}"
+    echo -e "         (If it built the wrong app, this clone's infra/build-frontend.sh is stale — git pull.)"
+    exit 1
+fi
 echo -e "  ${DIM}app${NC}        $APP_MODE  ($FRONTEND_PATH)"
 
 # Pick the speech LM engine (only one runs on :8000).
