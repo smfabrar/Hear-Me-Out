@@ -522,27 +522,25 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
     voice_prompt = request.query.get("voice_prompt", "")
     text_prompt = request.query.get("text_prompt", "")
     session_id = request.query.get("session_id", "")
-    voice_mode = "vc"
     need_resample = source_sr != 16000
 
     browser_ws = web.WebSocketResponse()
     await browser_ws.prepare(request)
 
-    # Study mode: the browser passes only an opaque session_id. Resolve the hidden
-    # prompt/target/steps server-side so participants never see them. Works the
-    # same for both VC engines (identical route surface).
+    # Study mode: the browser passes only an opaque session_id; resolve the hidden
+    # prompt + timed voice schedule server-side. Legacy (HMO) mode uses the single
+    # target_id from the query as a one-segment VC schedule.
     if session_id:
         cond = await resolve_study_condition(session_id)
         if cond is None:
             await browser_ws.send_json({"error": "Unknown or unresolved session"})
             await browser_ws.close()
             return browser_ws
-        voice_mode = cond.get("voice_mode", "vc")
         text_prompt = cond.get("text_prompt", "")
         voice_prompt = cond.get("voice_prompt") or voice_prompt
-        steps = int(cond.get("steps") or steps)
-        if voice_mode == "vc":
-            target_id = cond.get("engine_target_id") or ""
+        schedule = cond.get("schedule") or [{"mode": "natural", "start_s": 0, "end_s": None}]
+    else:
+        schedule = [{"mode": "vc", "start_s": 0, "end_s": None, "engine_target_id": target_id}]
 
     if need_resample:
         import torchaudio
@@ -552,22 +550,29 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
         ).to("cpu")
         logger.info(f"[proxy] Resampling enabled: {source_sr}Hz -> 16000Hz")
 
-    # 'natural' condition: no VC target/session — the mic audio is forwarded to
-    # PersonaPlex unmodified (the proxy still hides the prompt). Otherwise set up
-    # the MeanVC inference session for the resolved target.
-    session = None
-    if voice_mode == "vc":
-        if target_id not in targets:
-            await browser_ws.send_json({"error": f"Unknown target_id: {target_id}"})
-            await browser_ws.close()
-            return browser_ws
-        with targets_lock:
-            spk_emb, prompt_mel = targets[target_id]
-        session = InferenceSession(models, spk_emb, prompt_mel, steps=steps)
+    # One InferenceSession per distinct VC target referenced by the schedule.
+    # Natural segments need none; a missing target falls back to pass-through.
+    vc_sessions: dict[str, "InferenceSession"] = {}
+    for seg in schedule:
+        if seg.get("mode") == "vc":
+            tid = seg.get("engine_target_id")
+            if tid and tid in targets and tid not in vc_sessions:
+                with targets_lock:
+                    spk_emb, prompt_mel = targets[tid]
+                vc_sessions[tid] = InferenceSession(models, spk_emb, prompt_mel, steps=steps)
+    has_vc = len(vc_sessions) > 0
 
-    # Chunk size for buffering mic PCM: MeanVC's native chunk in VC mode, a fixed
-    # 0.1 s window in natural pass-through.
-    CHUNK = session.CHUNK if session is not None else 1600
+    def active_segment(elapsed_s: float) -> dict:
+        for seg in schedule:
+            start = seg.get("start_s") or 0
+            end = seg.get("end_s")
+            if elapsed_s >= start and (end is None or elapsed_s < end):
+                return seg
+        return schedule[-1]
+
+    # Chunk size for buffering mic PCM: MeanVC's native chunk when any VC segment
+    # exists, else a fixed 0.1 s window for pure pass-through.
+    CHUNK = next(iter(vc_sessions.values())).CHUNK if has_vc else 1600
     # MeanVC outputs 16 kHz, but sphn's Opus encoder only accepts 24 kHz / 48 kHz
     # (PersonaPlex itself uses 24 kHz = its mimi rate). So encode at 24 kHz and
     # resample the converted audio up before feeding the encoder.
@@ -599,6 +604,9 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
         return browser_ws
 
     chunk_count = 0
+    processed_samples = 0            # 16 kHz samples consumed → elapsed time for the schedule
+    warmed: set = set()             # target ids whose session has done its warmup chunk
+    seg_counts: dict = {}           # per-target chunk counter for periodic reset_cache
     acc_samples = np.array([], dtype=np.float32)
     # sphn.append_pcm only accepts exact Opus frame sizes; 1920 @ 24 kHz is what
     # PersonaPlex itself feeds. Buffer the resampled audio and emit fixed frames.
@@ -606,7 +614,7 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
     opus_pcm_buf = np.array([], dtype=np.float32)
 
     async def browser_to_pplx():
-        nonlocal chunk_count, acc_samples, opus_pcm_buf
+        nonlocal chunk_count, processed_samples, acc_samples, opus_pcm_buf
         async for msg in browser_ws:
             if msg.type == web.WSMsgType.BINARY:
                 incoming = np.frombuffer(msg.data, dtype=np.float32).copy()
@@ -620,30 +628,28 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
                     acc_samples = acc_samples[CHUNK:]
                     chunk_count += 1
 
-                    if session is None:
-                        # Natural pass-through: forward the raw mic chunk as-is.
+                    # Pick the active segment by elapsed audio time, then advance.
+                    seg = active_segment(processed_samples / 16000.0)
+                    processed_samples += len(chunk)
+                    tid = seg.get("engine_target_id") if seg.get("mode") == "vc" else None
+                    sess = vc_sessions.get(tid) if tid else None
+
+                    if sess is None:
+                        # Natural (or missing target): forward the raw mic chunk.
                         vc_wav = chunk
                     else:
-                        if chunk_count == 1:
-                            # First chunk is warmup padding; produce but don't forward.
-                            chunk = np.concatenate(
-                                [chunk, np.zeros(720, dtype=np.float32)]
-                            )
-                            await loop.run_in_executor(
-                                None, session.inference_one_chunk, chunk
-                            )
+                        if tid not in warmed:
+                            # First chunk on this target is warmup padding — don't forward.
+                            padded = np.concatenate([chunk, np.zeros(720, dtype=np.float32)])
+                            await loop.run_in_executor(None, sess.inference_one_chunk, padded)
+                            warmed.add(tid)
                             continue
-
-                        # Periodically realign the streaming offsets (matches the
-                        # reference run_rt.py). Without this, asr/vc offsets grow
-                        # unbounded and quality drifts over a long conversation.
-                        if chunk_count % 50 == 0:
-                            session.reset_cache()
-
+                        # Periodically realign streaming offsets (per reference run_rt.py).
+                        seg_counts[tid] = seg_counts.get(tid, 0) + 1
+                        if seg_counts[tid] % 50 == 0:
+                            sess.reset_cache()
                         try:
-                            vc_wav = await loop.run_in_executor(
-                                None, session.inference_one_chunk, chunk
-                            )
+                            vc_wav = await loop.run_in_executor(None, sess.inference_one_chunk, chunk)
                         except Exception as e:
                             logger.error(f"[proxy] Inference error chunk {chunk_count}: {e}")
                             continue

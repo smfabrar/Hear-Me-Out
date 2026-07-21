@@ -271,34 +271,41 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
     voice_prompt = request.query.get("voice_prompt", "")
     text_prompt = request.query.get("text_prompt", "")
     session_id = request.query.get("session_id", "")
-    voice_mode = "vc"
     resampler = _maybe_resampler(source_sr)
 
     browser_ws = web.WebSocketResponse()
     await browser_ws.prepare(request)
 
-    # Study mode: resolve the hidden prompt/target from app-api via opaque session_id.
+    # Study mode: resolve the hidden prompt + timed voice schedule via session_id.
     if session_id:
         cond = await resolve_study_condition(session_id)
         if cond is None:
             await browser_ws.send_json({"error": "Unknown or unresolved session"})
             await browser_ws.close()
             return browser_ws
-        voice_mode = cond.get("voice_mode", "vc")
         text_prompt = cond.get("text_prompt", "")
         voice_prompt = cond.get("voice_prompt") or voice_prompt
-        if voice_mode == "vc":
-            target_id = cond.get("engine_target_id") or ""
+        schedule = cond.get("schedule") or [{"mode": "natural", "start_s": 0, "end_s": None}]
+    else:
+        schedule = [{"mode": "vc", "start_s": 0, "end_s": None, "engine_target_id": target_id}]
 
-    # 'natural' pass-through: no target/session, mic audio forwarded unmodified.
-    session = None
-    if voice_mode == "vc":
-        if target_id not in targets:
-            await browser_ws.send_json({"error": f"Unknown target_id: {target_id}"})
-            await browser_ws.close()
-            return browser_ws
-        spk, frame = targets[target_id]
-        session = XVCStreamSession(spk, frame)
+    # One X-VC session per distinct VC target in the schedule; natural = pass-through.
+    vc_sessions = {}
+    for seg in schedule:
+        if seg.get("mode") == "vc":
+            tid = seg.get("engine_target_id")
+            if tid and tid in targets and tid not in vc_sessions:
+                spk, frame = targets[tid]
+                vc_sessions[tid] = XVCStreamSession(spk, frame)
+
+    def active_segment(elapsed_s):
+        for seg in schedule:
+            start = seg.get("start_s") or 0
+            end = seg.get("end_s")
+            if elapsed_s >= start and (end is None or elapsed_s < end):
+                return seg
+        return schedule[-1]
+
     loop = asyncio.get_event_loop()
 
     # X-VC outputs 16 kHz; sphn's Opus encoder only accepts 24/48 kHz (PersonaPlex
@@ -326,21 +333,26 @@ async def handle_chat_proxy(request: web.Request) -> web.WebSocketResponse:
         return browser_ws
 
     chunk_count = 0
+    processed_samples = 0            # SR-rate samples consumed → elapsed time for the schedule
     opus_pcm_buf = np.zeros(0, dtype=np.float32)
 
     async def browser_to_pplx():
-        nonlocal chunk_count, opus_pcm_buf
+        nonlocal chunk_count, processed_samples, opus_pcm_buf
         async for msg in browser_ws:
             if msg.type == web.WSMsgType.BINARY:
                 incoming = np.frombuffer(msg.data, dtype=np.float32).copy()
                 if resampler is not None:
                     incoming = resampler(torch.from_numpy(incoming).unsqueeze(0)).squeeze(0).numpy()
-                if session is None:
-                    # Natural pass-through: forward the raw mic window unmodified.
+                seg = active_segment(processed_samples / float(SR))
+                processed_samples += len(incoming)
+                tid = seg.get("engine_target_id") if seg.get("mode") == "vc" else None
+                sess = vc_sessions.get(tid) if tid else None
+                if sess is None:
+                    # Natural (or missing target): forward the raw mic window unmodified.
                     curs = [incoming]
                 else:
                     try:
-                        curs = await loop.run_in_executor(None, session.feed, incoming)
+                        curs = await loop.run_in_executor(None, sess.feed, incoming)
                     except Exception as e:
                         logger.error(f"[xvc proxy] inference error: {e}")
                         continue
