@@ -1,40 +1,55 @@
-// Study API client. Participant calls are same-origin (served by app-api).
-// Admin calls carry the X-Study-Admin-Token header.
+// Study API client (v2 — multi-study). Participant calls are same-origin; admin
+// calls carry the X-Study-Admin-Token header.
 
 const BASE = "/api/study";
 
-async function jpost(path: string, body: unknown, headers: Record<string, string> = {}) {
-  const r = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw await asError(r);
-  return r.json();
-}
-
 async function asError(r: Response): Promise<Error> {
   let detail = `HTTP ${r.status}`;
-  try {
-    const d = await r.json();
-    if (d?.detail) detail = d.detail;
-  } catch { /* ignore */ }
+  try { const d = await r.json(); if (d?.detail) detail = d.detail; } catch { /* ignore */ }
   const e = new Error(detail) as Error & { status?: number };
   e.status = r.status;
   return e;
 }
 
+async function jpost(path: string, body: unknown, headers: Record<string, string> = {}) {
+  const r = await fetch(`${BASE}${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body),
+  });
+  if (!r.ok) throw await asError(r);
+  return r.json();
+}
+
+async function jput(path: string, body: unknown, headers: Record<string, string> = {}) {
+  const r = await fetch(`${BASE}${path}`, {
+    method: "PUT", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body),
+  });
+  if (!r.ok) throw await asError(r);
+  return r.json();
+}
+
+async function jget(path: string, headers: Record<string, string> = {}) {
+  const r = await fetch(`${BASE}${path}`, { headers });
+  if (!r.ok) throw await asError(r);
+  return r.json();
+}
+
+async function jdel(path: string, headers: Record<string, string> = {}) {
+  const r = await fetch(`${BASE}${path}`, { method: "DELETE", headers });
+  if (!r.ok) throw await asError(r);
+  return r.json();
+}
+
 // ---------- participant ----------
 export interface ScenarioInfo {
   scenario_order: number;
-  scenario_id: string;
+  scenario_id: number;
+  title: string;
   role: string;
   task_goal: string;
   relevant_facts: string;
   success_criteria: string;
   time_limit_s: number;
 }
-
 export interface RunState {
   status: "not_started" | "in_progress" | "submitted" | "expired";
   current_step?: Record<string, any>;
@@ -42,7 +57,6 @@ export interface RunState {
   remaining_seconds?: number;
   attempt?: number;
 }
-
 export interface EnterResult {
   participant_id: string;
   study_name: string;
@@ -50,27 +64,29 @@ export interface EnterResult {
   questionnaires?: Record<string, any[]>;
   run: RunState;
 }
+export interface PrepareState {
+  status: "idle" | "preparing" | "ready" | "error";
+  steps: { label: string; state: string }[];
+  error?: string | null;
+  version: number;
+}
 
 export const api = {
   enter: (code: string): Promise<EnterResult> => jpost("/enter", { code }),
   runStart: (code: string, mode: "resume" | "restart") => jpost("/run/start", { code, mode }),
-  prepareStatus: () => fetch(`${BASE}/run/prepare/status`).then(r => r.json()),
   progress: (code: string, current_step: Record<string, any>, completed: Record<string, any>) =>
     jpost("/run/progress", { code, current_step, completed }),
-  sessionStart: (code: string, scenario_order: number) =>
+  sessionStart: (code: string, scenario_order: number): Promise<{ session_id: string; scenario: ScenarioInfo; prepare: PrepareState }> =>
     jpost("/session/start", { code, scenario_order }),
-  sessionEnd: (sessionId: string, reason: string) =>
-    jpost(`/session/${sessionId}/end`, { reason }),
+  prepareStatus: (): Promise<PrepareState> => jget("/run/prepare/status"),
+  sessionEnd: (sessionId: string, reason: string) => jpost(`/session/${sessionId}/end`, { reason }),
   questionnaire: (sessionId: string | null, code: string, kind: string, payload: Record<string, any>) =>
     jpost(`/session/${sessionId ?? "none"}/questionnaire`, { code, kind, payload }),
   submit: (code: string) => jpost("/run/submit", { code }),
 
   async saveSession(sessionId: string, arts: {
-    participant?: Blob | null;
-    participant_raw?: Blob | null;
-    model?: Blob | null;
-    merged?: Blob | null;
-    model_transcript?: unknown;
+    participant?: Blob | null; participant_raw?: Blob | null; model?: Blob | null;
+    merged?: Blob | null; model_transcript?: unknown;
   }) {
     const fd = new FormData();
     if (arts.participant) fd.append("participant", arts.participant, "participant.wav");
@@ -84,32 +100,52 @@ export const api = {
   },
 };
 
-// ---------- admin ----------
-export function adminHeaders(token: string) {
-  return { "X-Study-Admin-Token": token };
+// EventSource stream of prepare state; onState called on each update; resolves when terminal.
+export function streamPrepare(onState: (s: PrepareState) => void): () => void {
+  const es = new EventSource(`${BASE}/run/prepare/stream`);
+  es.onmessage = (e) => {
+    try {
+      const s = JSON.parse(e.data) as PrepareState;
+      onState(s);
+      if (s.status === "ready" || s.status === "error") es.close();
+    } catch { /* ignore */ }
+  };
+  es.onerror = () => es.close();
+  return () => es.close();
 }
 
+// ---------- admin ----------
+export function adminHeaders(token: string) { return { "X-Study-Admin-Token": token }; }
+
 export const adminApi = {
-  getConfig: (token: string) =>
-    fetch(`${BASE}/config`, { headers: adminHeaders(token) }).then(async r => {
-      if (!r.ok) throw await asError(r);
-      return r.json();
-    }),
-  putConfig: (token: string, config: unknown) => jpost("/config", config, adminHeaders(token)),
-  activate: (token: string) => jpost("/activate", {}, adminHeaders(token)),
-  stopEngine: (token: string) => jpost("/stop-engine", {}, adminHeaders(token)),
-  generate: (token: string, count: number) => jpost("/participants/generate", { count }, adminHeaders(token)),
-  runs: (token: string) => fetch(`${BASE}/runs`, { headers: adminHeaders(token) }).then(r => r.json()),
-  sessions: (token: string) => fetch(`${BASE}/sessions`, { headers: adminHeaders(token) }).then(r => r.json()),
-  async uploadTarget(token: string, ref: string, speakerId: string, label: string, file: File) {
+  voices: (t: string): Promise<{ voices: string[] }> => jget("/voices", adminHeaders(t)),
+  engines: (t: string): Promise<{ engines: string[] }> => jget("/engines", adminHeaders(t)),
+  stopEngine: (t: string) => jpost("/stop-engine", {}, adminHeaders(t)),
+
+  listStudies: (t: string) => jget("/studies", adminHeaders(t)),
+  createStudy: (t: string, name: string, description = "") => jpost("/studies", { name, description }, adminHeaders(t)),
+  getStudy: (t: string, id: number) => jget(`/studies/${id}`, adminHeaders(t)),
+  updateStudy: (t: string, id: number, body: { name?: string; description?: string }) => jput(`/studies/${id}`, body, adminHeaders(t)),
+  archiveStudy: (t: string, id: number) => jdel(`/studies/${id}`, adminHeaders(t)),
+  setQuestionnaires: (t: string, id: number, questionnaires: unknown) =>
+    jput(`/studies/${id}/questionnaires`, { questionnaires }, adminHeaders(t)),
+
+  addScenario: (t: string, id: number, scenario: unknown) => jpost(`/studies/${id}/scenarios`, scenario, adminHeaders(t)),
+  updateScenario: (t: string, id: number, sid: number, scenario: unknown) => jput(`/studies/${id}/scenarios/${sid}`, scenario, adminHeaders(t)),
+  deleteScenario: (t: string, id: number, sid: number) => jdel(`/studies/${id}/scenarios/${sid}`, adminHeaders(t)),
+
+  async uploadTarget(t: string, id: number, ref: string, speakerId: string, label: string, engine: string, file: File) {
     const fd = new FormData();
-    fd.append("wav", file);
-    fd.append("ref", ref);
-    fd.append("speaker_id", speakerId);
-    fd.append("label", label);
-    const r = await fetch(`${BASE}/targets`, { method: "POST", headers: adminHeaders(token), body: fd });
+    fd.append("wav", file); fd.append("ref", ref); fd.append("speaker_id", speakerId);
+    fd.append("label", label); fd.append("engine", engine);
+    const r = await fetch(`${BASE}/studies/${id}/targets`, { method: "POST", headers: adminHeaders(t), body: fd });
     if (!r.ok) throw await asError(r);
     return r.json();
   },
-  exportUrl: (format: "json" | "zip") => `${BASE}/export?format=${format}`,
+  deleteTarget: (t: string, id: number, tid: number) => jdel(`/studies/${id}/targets/${tid}`, adminHeaders(t)),
+
+  generate: (t: string, id: number, count: number) => jpost(`/studies/${id}/participants/generate`, { count }, adminHeaders(t)),
+  runs: (t: string, id: number) => jget(`/studies/${id}/runs`, adminHeaders(t)),
+  sessions: (t: string, id: number) => jget(`/studies/${id}/sessions`, adminHeaders(t)),
+  exportUrl: (id: number, format: "json" | "zip") => `${BASE}/studies/${id}/export?format=${format}`,
 };

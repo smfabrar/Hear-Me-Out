@@ -132,6 +132,15 @@ if [ "$APP_MODE" = "study" ]; then
     export STUDY_DB_PATH="${STUDY_DB_PATH:-$HEARMEOUT_DIR/study.db}"
     export STUDY_DATA_DIR="${STUDY_DATA_DIR:-$HEARMEOUT_DIR/study_data}"
     export STUDY_VC_HOST="${STUDY_VC_HOST:-127.0.0.1}"
+    # Best-effort: locate the PersonaPlex voice prompts (.pt) in the HF cache so the
+    # admin's assistant-voice dropdown (/api/study/voices) is populated.
+    if [ -z "$PERSONAPLEX_VOICES_DIR" ]; then
+        for _hub in "$HF_HOME/hub" "$HUGGINGFACE_HUB_CACHE" "$WORKSPACE/huggingface/hub" "$HOME/.cache/huggingface/hub"; do
+            _vd=$(ls -d "$_hub"/models--nvidia--personaplex-7b-v1/snapshots/*/voices 2>/dev/null | head -1)
+            [ -n "$_vd" ] && { export PERSONAPLEX_VOICES_DIR="$_vd"; break; }
+        done
+    fi
+    [ -n "$PERSONAPLEX_VOICES_DIR" ] && echo -e "  ${DIM}voices${NC}     $PERSONAPLEX_VOICES_DIR"
 fi
 # MiniCPM-o (GGUF via llama.cpp-omni): point the bridge at the C++ engine + GGUF weights.
 # Q4_K_M ≈ 9GB VRAM on a 24GB card, so there's plenty of headroom — app-api's Whisper

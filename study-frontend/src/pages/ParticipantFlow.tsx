@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useState, type ReactNode } from "react"
 import { Button } from "@shared/ui/button"
 import { Input } from "@shared/ui/input"
 import { Spinner } from "@shared/ui/spinner"
-import { CheckCircle2, XCircle } from "lucide-react"
+import { CheckCircle2 } from "lucide-react"
 import { api, type EnterResult, type RunState } from "@/api"
 import { QuestionnaireForm, type QItem } from "@/components/QuestionnaireForm"
 import { ScenarioCall } from "@/components/ScenarioCall"
 
 type Phase =
-  | "code" | "welcome" | "preparing"
+  | "code" | "welcome"
   | "consent" | "background" | "scenario" | "post" | "final" | "completion"
 
 function sessionIdFor(pid: string, order: number) {
@@ -69,10 +69,9 @@ export function ParticipantFlow() {
     return false
   }
 
-  // Where to land after prepare. Uses the FRESH run from run/start (not the stale
-  // enter state): a restart yields an empty current_step -> consent (first phase).
-  const pendingRef = useRef<{ mode: "resume" | "restart"; run: RunState } | null>(null)
-
+  // Where to land after run/start. Uses the FRESH run (not the stale enter state):
+  // a restart yields an empty current_step -> consent (first phase). Per-scenario
+  // engine prepare happens later inside ScenarioCall.
   const goToRunStep = useCallback((run: RunState) => {
     const step = run.current_step || {}
     const p = step.phase as Phase | undefined
@@ -87,23 +86,26 @@ export function ParticipantFlow() {
     setPhase("consent")
   }, [])
 
+  const setStep = useCallback((current_step: Record<string, any>, completed: Record<string, any> = {}) => {
+    if (code) api.progress(code, current_step, completed).catch(() => {})
+  }, [code])
+
   const startRun = useCallback(async (mode: "resume" | "restart") => {
     setBusy(true); setError(null)
     try {
       const res = await api.runStart(code, mode)
-      pendingRef.current = { mode, run: res.run }
       setData(d => (d ? { ...d, run: res.run } : d))
       const secs = res?.run?.remaining_seconds ?? 3600
       setDeadline(Date.now() + secs * 1000)
-      setPhase("preparing")
+      if (mode === "restart") {
+        setScenarioIdx(0); setStep({ phase: "consent" }); setPhase("consent")
+      } else {
+        goToRunStep(res.run)
+      }
     } catch (e: any) {
       setError(e?.message || "Could not start")
     } finally { setBusy(false) }
-  }, [code])
-
-  const setStep = useCallback((current_step: Record<string, any>, completed: Record<string, any> = {}) => {
-    if (code) api.progress(code, current_step, completed).catch(() => {})
-  }, [code])
+  }, [code, goToRunStep, setStep])
 
   // ---------- render ----------
   if (phase === "code") {
@@ -155,19 +157,6 @@ export function ParticipantFlow() {
         {error && <p className="text-sm text-destructive">{error}</p>}
       </Centered>
     )
-  }
-
-  if (phase === "preparing") {
-    return <Preparing onReady={() => {
-      const p = pendingRef.current
-      if (p?.mode === "restart") {
-        setScenarioIdx(0)
-        setStep({ phase: "consent" })
-        setPhase("consent")
-      } else {
-        goToRunStep(p?.run ?? (data?.run as RunState))
-      }
-    }} onError={(m) => setError(m)} />
   }
 
   const Frame = (children: ReactNode) => (
@@ -286,42 +275,5 @@ function Centered({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-4 text-center">
       {children}
     </div>
-  )
-}
-
-function Preparing({ onReady, onError }: { onReady: () => void; onError: (m: string) => void }) {
-  const [state, setState] = useState<{ status: string; steps: { label: string; state: string }[]; error?: string }>({
-    status: "preparing", steps: [],
-  })
-  const done = useRef(false)
-
-  useEffect(() => {
-    const poll = setInterval(async () => {
-      try {
-        const s = await api.prepareStatus()
-        setState(s)
-        if (s.status === "ready" && !done.current) { done.current = true; clearInterval(poll); onReady() }
-        if (s.status === "error" && !done.current) { done.current = true; clearInterval(poll); onError(s.error || "Preparation failed") }
-      } catch { /* keep polling */ }
-    }, 500)
-    return () => clearInterval(poll)
-  }, [onReady, onError])
-
-  return (
-    <Centered>
-      <h1 className="text-xl font-semibold">Preparing your session…</h1>
-      <div className="flex w-full max-w-sm flex-col gap-2 text-left">
-        {state.steps.map((s, i) => (
-          <div key={i} className="flex items-center gap-2 text-sm">
-            {s.state === "done" ? <CheckCircle2 className="size-4 text-primary" />
-              : s.state === "error" ? <XCircle className="size-4 text-destructive" />
-              : <Spinner className="size-4" />}
-            <span className={s.state === "error" ? "text-destructive" : ""}>{s.label}</span>
-          </div>
-        ))}
-        {state.steps.length === 0 && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner className="size-4" /> Starting…</div>}
-      </div>
-      {state.status === "error" && <p className="text-sm text-destructive">{state.error}</p>}
-    </Centered>
   )
 }
