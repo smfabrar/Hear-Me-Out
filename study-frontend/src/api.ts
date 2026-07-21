@@ -70,18 +70,14 @@ export const api = {
     participant_raw?: Blob | null;
     model?: Blob | null;
     merged?: Blob | null;
-    transcript?: unknown;
-    metrics?: unknown;
-    audiobox_available?: boolean;
+    model_transcript?: unknown;
   }) {
     const fd = new FormData();
     if (arts.participant) fd.append("participant", arts.participant, "participant.wav");
     if (arts.participant_raw) fd.append("participant_raw", arts.participant_raw, "participant_raw.wav");
     if (arts.model) fd.append("model", arts.model, "model.wav");
     if (arts.merged) fd.append("merged", arts.merged, "merged.wav");
-    fd.append("transcript", JSON.stringify(arts.transcript ?? null));
-    fd.append("metrics", JSON.stringify(arts.metrics ?? null));
-    fd.append("audiobox_available", String(!!arts.audiobox_available));
+    fd.append("model_transcript", JSON.stringify(arts.model_transcript ?? null));
     const r = await fetch(`${BASE}/session/${sessionId}/save`, { method: "POST", body: fd });
     if (!r.ok) throw await asError(r);
     return r.json();

@@ -77,6 +77,9 @@ class StorageBackend(abc.ABC):
     def save_session(self, session_id: str, files: dict, transcript: Any, metrics: Any,
                      audiobox_available: bool) -> None: ...
     @abc.abstractmethod
+    def update_session_analysis(self, session_id: str, transcript: Any, metrics: Any,
+                                audiobox_available: bool) -> None: ...
+    @abc.abstractmethod
     def end_session(self, session_id: str, end_reason: str) -> None: ...
     @abc.abstractmethod
     def get_session(self, session_id: str) -> Optional[dict]: ...
@@ -342,6 +345,13 @@ class SqliteBackend(StorageBackend):
             c.execute("UPDATE session SET files_json=?, transcript_json=?, metrics_json=?, "
                       "audiobox_available=? WHERE session_id=?",
                       (json.dumps(files), json.dumps(transcript), json.dumps(metrics),
+                       1 if audiobox_available else 0, session_id))
+
+    def update_session_analysis(self, session_id, transcript, metrics, audiobox_available) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE session SET transcript_json=?, metrics_json=?, audiobox_available=? "
+                      "WHERE session_id=?",
+                      (json.dumps(transcript), json.dumps(metrics),
                        1 if audiobox_available else 0, session_id))
 
     def end_session(self, session_id, end_reason) -> None:

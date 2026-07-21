@@ -19,10 +19,11 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import (APIRouter, Depends, File, Form, Header, HTTPException,
-                     Request, UploadFile)
+from fastapi import (APIRouter, BackgroundTasks, Depends, File, Form, Header,
+                     HTTPException, UploadFile)
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .analysis import run_session_analysis
 from .engine import get_manager
 from .models import (EnterRequest, GenerateRequest, ProgressRequest,
                      QuestionnaireRequest, RunStartRequest, SessionStartRequest,
@@ -308,13 +309,15 @@ def build_study_router() -> APIRouter:
 
     @router.post("/session/{session_id}/save")
     async def session_save(session_id: str,
+                           background_tasks: BackgroundTasks,
                            participant: UploadFile | None = File(None),
                            participant_raw: UploadFile | None = File(None),
                            model: UploadFile | None = File(None),
                            merged: UploadFile | None = File(None),
-                           transcript: str = Form("null"),
-                           metrics: str = Form("null"),
-                           audiobox_available: str = Form("false")):
+                           model_transcript: str = Form("null")):
+        """Saves the audio + metadata immediately and returns fast. Transcription
+        and VC-quality metrics run in the background so the participant advances
+        without waiting (they can be minutes on the first run)."""
         session = backend.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Unknown session")
@@ -328,21 +331,22 @@ def build_study_router() -> APIRouter:
                 with open(dest, "wb") as f:
                     shutil.copyfileobj(up.file, f)
                 files[name] = str(dest.relative_to(STUDY_DATA_DIR))
-        transcript_obj = json.loads(transcript) if transcript and transcript != "null" else None
-        metrics_obj = json.loads(metrics) if metrics and metrics != "null" else None
-        ab = audiobox_available.lower() in ("1", "true", "yes")
-        # Mirror JSON next to the WAVs for easy offline analysis.
-        (out_dir / "transcript.json").write_text(json.dumps(transcript_obj, indent=2))
-        (out_dir / "metrics.json").write_text(json.dumps(metrics_obj, indent=2))
+
+        model_turns = json.loads(model_transcript) if model_transcript and model_transcript != "null" else []
         metadata = {
             "participant_id": session["participant_id"], "session_id": session_id,
             "scenario_id": session["scenario_id"], "scenario_order": session["scenario_order"],
             "voice_condition": session["voice_condition"], "target_speaker_id": session["target_speaker_id"],
-            "audiobox_available": ab, "files": files,
+            "files": files,
         }
         (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
-        backend.save_session(session_id, files, transcript_obj, metrics_obj, ab)
-        return {"ok": True, "files": files}
+        # Persist audio + the model turns immediately; analysis fills in the rest.
+        backend.save_session(session_id, files, {"model": model_turns, "participant": None}, None, False)
+
+        converted_path = str(out_dir / "participant.wav") if participant is not None else None
+        raw_path = str(out_dir / "participant_raw.wav") if participant_raw is not None else None
+        background_tasks.add_task(run_session_analysis, session_id, converted_path, raw_path, model_turns)
+        return {"ok": True, "files": files, "analysis": "scheduled"}
 
     @router.post("/session/{session_id}/end")
     async def session_end(session_id: str, body: dict):

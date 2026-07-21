@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useWebSocket } from "@shared/hooks/useWebSocket"
 import { useMeanVCPipeline } from "@shared/hooks/useMeanVCPipeline"
-import { transcribeWavBlob, compareMetricsData } from "@shared/services/api"
 import { mergeAudioTracks } from "@shared/services/audioMerge"
 import { getStudyChatProxyWsUrl } from "@/lib/config"
 
@@ -10,9 +9,7 @@ export interface SessionArtifacts {
   participant_raw: Blob | null   // raw mic
   model: Blob | null             // PersonaPlex audio
   merged: Blob | null
-  transcript: unknown
-  metrics: unknown
-  audiobox_available: boolean
+  model_transcript: unknown      // PersonaPlex turns (cheap; server adds the rest)
 }
 
 export type CallStatus = "idle" | "connecting" | "active" | "processing" | "error"
@@ -80,30 +77,17 @@ export function useStudyConversation() {
     const rawWav = vc.getOriginalUserWav()
     const modelWav = await ws.getPersonaplexWav()
 
+    // Merge is cheap local audio processing; transcription + VC metrics are done
+    // on the server in the background so the participant doesn't wait.
     let merged: Blob | null = null
     if (vcWav && modelWav) {
       try { merged = await mergeAudioTracks(vcWav, modelWav) } catch { merged = null }
     }
 
-    let participantSegs: unknown = null
-    if (vcWav) {
-      try { participantSegs = (await transcribeWavBlob(vcWav)).segments } catch { participantSegs = null }
-    }
-    const transcript = { participant: participantSegs, model: ws.transcripts }
-
-    let metrics: unknown = null
-    let audiobox = false
-    if (rawWav && vcWav) {
-      try {
-        metrics = await compareMetricsData(rawWav, vcWav)
-        audiobox = !!(metrics as any)?.audiobox_available
-      } catch { metrics = null }
-    }
-
     setStatus("idle")
     return {
       participant: vcWav, participant_raw: rawWav, model: modelWav, merged,
-      transcript, metrics, audiobox_available: audiobox,
+      model_transcript: ws.transcripts,
     }
   }, [ws, vc])
 
