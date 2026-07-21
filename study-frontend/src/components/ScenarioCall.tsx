@@ -24,10 +24,14 @@ export function ScenarioCall({ code, scenario, onDone }: {
   const [errMsg, setErrMsg] = useState<string | null>(null)
   const sessionIdRef = useRef<string | null>(null)
 
-  // Reflect handshake -> active
+  // Reflect the conversation status into the call phase.
   useEffect(() => {
     if (conv.status === "active" && phase === "connecting") setPhase("active")
-  }, [conv.status, phase])
+    if (conv.status === "error" && (phase === "connecting" || phase === "active")) {
+      setErrMsg(conv.error || "Could not connect to the assistant.")
+      setPhase("error")
+    }
+  }, [conv.status, conv.error, phase])
 
   // Countdown while the call is active.
   useEffect(() => {

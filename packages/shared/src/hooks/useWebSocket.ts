@@ -212,6 +212,16 @@ export function useWebSocket() {
 
     socket.onmessage = async (event) => {
       try {
+        // Text frames are JSON status/error messages from the proxy (e.g. an
+        // unknown target). Surface them instead of mis-reading the string as
+        // binary (which would look like a stray handshake).
+        if (typeof event.data === "string") {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg?.error) setError(String(msg.error));
+          } catch { /* ignore non-JSON text */ }
+          return;
+        }
         const arrayBuffer = await (event.data instanceof Blob
           ? event.data.arrayBuffer()
           : event.data);

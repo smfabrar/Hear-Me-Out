@@ -24,15 +24,31 @@ export function useStudyConversation() {
   const vc = useMeanVCPipeline((d) => ws.sendRawAudio(d), 8)
   const [status, setStatus] = useState<CallStatus>("idle")
   const streamingRef = useRef(false)
+  const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearConnectTimer = () => {
+    if (connectTimerRef.current) { clearTimeout(connectTimerRef.current); connectTimerRef.current = null }
+  }
 
   // Start sending mic audio once PersonaPlex's handshake arrives via the proxy.
   useEffect(() => {
     if (ws.handshakeReceived && streamingRef.current) {
+      clearConnectTimer()
       vc.beginSending()
       setStatus("active")
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.handshakeReceived])
+
+  // Surface a connection error (proxy sent an error, or the socket dropped)
+  // instead of spinning forever on "connecting".
+  useEffect(() => {
+    if (ws.error && streamingRef.current) {
+      clearConnectTimer()
+      setStatus("error")
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws.error])
 
   const start = useCallback(async (sessionId: string) => {
     setStatus("connecting")
@@ -41,6 +57,11 @@ export function useStudyConversation() {
     try {
       const proxy = await vc.startMic("session") // dummy target; proxy uses session_id
       ws.connect(getStudyChatProxyWsUrl(sessionId, proxy.sourceSr))
+      // If no handshake arrives in time, fail visibly (recoverable via Try again).
+      clearConnectTimer()
+      connectTimerRef.current = setTimeout(() => {
+        setStatus((s) => (s === "active" ? s : "error"))
+      }, 30000)
     } catch (e) {
       streamingRef.current = false
       setStatus("error")
@@ -50,6 +71,7 @@ export function useStudyConversation() {
 
   const stopAndAssemble = useCallback(async (): Promise<SessionArtifacts> => {
     streamingRef.current = false
+    clearConnectTimer()
     setStatus("processing")
     vc.stopVCStream()
     ws.disconnect()

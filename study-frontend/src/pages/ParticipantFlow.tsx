@@ -3,7 +3,7 @@ import { Button } from "@shared/ui/button"
 import { Input } from "@shared/ui/input"
 import { Spinner } from "@shared/ui/spinner"
 import { CheckCircle2, XCircle } from "lucide-react"
-import { api, type EnterResult } from "@/api"
+import { api, type EnterResult, type RunState } from "@/api"
 import { QuestionnaireForm, type QItem } from "@/components/QuestionnaireForm"
 import { ScenarioCall } from "@/components/ScenarioCall"
 
@@ -69,8 +69,12 @@ export function ParticipantFlow() {
     return false
   }
 
-  const goResumePoint = useCallback((res: EnterResult) => {
-    const step = res.run.current_step || {}
+  // Where to land after prepare. Uses the FRESH run from run/start (not the stale
+  // enter state): a restart yields an empty current_step -> consent (first phase).
+  const pendingRef = useRef<{ mode: "resume" | "restart"; run: RunState } | null>(null)
+
+  const goToRunStep = useCallback((run: RunState) => {
+    const step = run.current_step || {}
     const p = step.phase as Phase | undefined
     if (p === "background") { setPhase("background"); return }
     if (p === "scenario" || p === "post") {
@@ -79,6 +83,7 @@ export function ParticipantFlow() {
       return
     }
     if (p === "final") { setPhase("final"); return }
+    setScenarioIdx(0)
     setPhase("consent")
   }, [])
 
@@ -86,6 +91,8 @@ export function ParticipantFlow() {
     setBusy(true); setError(null)
     try {
       const res = await api.runStart(code, mode)
+      pendingRef.current = { mode, run: res.run }
+      setData(d => (d ? { ...d, run: res.run } : d))
       const secs = res?.run?.remaining_seconds ?? 3600
       setDeadline(Date.now() + secs * 1000)
       setPhase("preparing")
@@ -151,8 +158,16 @@ export function ParticipantFlow() {
   }
 
   if (phase === "preparing") {
-    return <Preparing onReady={() => data && goResumePoint(data)}
-                      onError={(m) => setError(m)} />
+    return <Preparing onReady={() => {
+      const p = pendingRef.current
+      if (p?.mode === "restart") {
+        setScenarioIdx(0)
+        setStep({ phase: "consent" })
+        setPhase("consent")
+      } else {
+        goToRunStep(p?.run ?? (data?.run as RunState))
+      }
+    }} onError={(m) => setError(m)} />
   }
 
   const Frame = (children: ReactNode) => (
