@@ -1,10 +1,11 @@
-"""FastAPI router for the study platform (mounted on app-api when APP_MODE=study).
+"""FastAPI router for the study platform (v2 — multi-study).
 
-Admin endpoints (token-gated) configure the study; participant endpoints run the
-resumable, time-limited flow and save artifacts. The system prompt and VC target
-never reach the browser: the participant client connects to the VC engine with
-only an opaque session_id, and the engine resolves the condition via the internal
-GET /api/study/condition/{session_id}.
+Admin endpoints (token-gated) manage many studies, their scenarios (with timed
+voice schedules), engine-tagged targets, and questionnaires. Participant
+endpoints run the resumable, time-limited flow; the system prompt + voice
+schedule never reach the browser (the VC engine resolves them via
+GET /condition/{session_id}). The engine for each scenario is prepared on demand,
+restarting :5002 when a scenario needs a different one.
 """
 
 from __future__ import annotations
@@ -25,14 +26,16 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .analysis import run_session_analysis
 from .engine import get_manager
-from .models import (EnterRequest, GenerateRequest, ProgressRequest,
-                     QuestionnaireRequest, RunStartRequest, SessionStartRequest,
-                     StudyConfig, SubmitRequest, default_config)
+from .models import (CreateStudyRequest, EnterRequest, GenerateRequest,
+                     ProgressRequest, QuestionnaireRequest, RunStartRequest,
+                     Scenario, SessionStartRequest, SubmitRequest,
+                     UpdateStudyRequest, default_questionnaires)
 from .storage import get_backend
 
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+WORKSPACE = Path(os.environ.get("WORKSPACE", str(REPO_ROOT.parent)))
 STUDY_DATA_DIR = Path(os.environ.get("STUDY_DATA_DIR", str(REPO_ROOT / "study_data")))
 TARGETS_DIR = STUDY_DATA_DIR / "targets"
 SESSIONS_DIR = STUDY_DATA_DIR / "sessions"
@@ -47,67 +50,71 @@ def require_admin(x_study_admin_token: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing admin token")
 
 
-def _active_study_or_default(backend) -> dict:
-    study = backend.get_active_study()
-    if study is None:
-        study = backend.upsert_active_study("Pilot Study", default_config())
-    return study
-
-
-def _conditions(study: dict) -> list[dict]:
-    return (study.get("config") or {}).get("conditions", [])
-
-
-def _find_condition(study: dict, idx: int) -> Optional[dict]:
-    for c in _conditions(study):
-        if c.get("idx") == idx:
-            return c
+# ---------- helpers ----------
+def _scenario_engine(scenario: dict) -> Optional[str]:
+    """The VC engine a scenario needs (its vc segments' engine), or None if natural-only."""
+    for seg in scenario.get("voice_schedule") or []:
+        if seg.get("mode") == "vc" and seg.get("engine"):
+            return seg["engine"]
     return None
 
 
-def _resolve_for_order(backend, study: dict, participant: dict, scenario_order: int):
-    """Map a participant's 1-based scenario_order to its condition + target row."""
-    order = participant.get("condition_order") or []
+def _schedule_label(scenario: dict) -> str:
+    segs = scenario.get("voice_schedule") or []
+    if not segs:
+        return "natural"
+    modes = [s.get("mode", "natural") for s in segs]
+    eng = _scenario_engine(scenario)
+    if len(set(modes)) == 1:
+        return modes[0] + (f":{eng}" if modes[0] == "vc" else "")
+    sw = segs[0].get("end_s")
+    return f"{modes[0]}->{modes[1]}@{int(sw) if sw else '?'}" + (f":{eng}" if eng else "")
+
+
+def _resolve_scenario(backend, participant: dict, scenario_order: int) -> dict:
+    order = participant.get("scenario_order") or []
     if scenario_order < 1 or scenario_order > len(order):
         raise HTTPException(status_code=400, detail="scenario_order out of range")
-    cond = _find_condition(study, order[scenario_order - 1])
-    if cond is None:
-        raise HTTPException(status_code=400, detail="condition not found for order")
-    target = None
-    if cond.get("voice_mode") == "vc" and cond.get("target_ref"):
-        for t in backend.list_targets(study["id"]):
-            if t["ref"] == cond["target_ref"]:
-                target = t
-                break
-    return cond, target
+    scenario = backend.get_scenario(order[scenario_order - 1])
+    if not scenario:
+        raise HTTPException(status_code=400, detail="scenario not found")
+    return scenario
 
 
-def _scenario_card_for_participant(study: dict, participant: dict, scenario_order: int) -> dict:
-    """The participant-facing scenario info only — no prompts or targets."""
-    order = participant.get("condition_order") or []
-    cond = _find_condition(study, order[scenario_order - 1])
-    scenario = (cond or {}).get("scenario", {})
+def _scenario_card(scenario: dict, scenario_order: int) -> dict:
+    card = scenario.get("scenario_card") or {}
     return {
         "scenario_order": scenario_order,
-        "scenario_id": f"scenario_{cond.get('idx')}" if cond else "",
-        "role": scenario.get("role", ""),
-        "task_goal": scenario.get("task_goal", ""),
-        "relevant_facts": scenario.get("relevant_facts", ""),
-        "success_criteria": scenario.get("success_criteria", ""),
-        "time_limit_s": (cond or {}).get("time_limit_s", 300),
+        "scenario_id": scenario.get("id"),
+        "title": scenario.get("title", ""),
+        "role": card.get("role", ""),
+        "task_goal": card.get("task_goal", ""),
+        "relevant_facts": card.get("relevant_facts", ""),
+        "success_criteria": card.get("success_criteria", ""),
+        "time_limit_s": scenario.get("time_limit_s", 300),
     }
 
 
 def _run_public(run: Optional[dict]) -> dict:
     if not run:
         return {"status": "not_started"}
-    return {
-        "status": run["status"],
-        "current_step": run.get("current_step") or {},
-        "completed": run.get("completed") or {},
-        "remaining_seconds": run.get("remaining_seconds", 0),
-        "attempt": run.get("attempt", 1),
-    }
+    return {"status": run["status"], "current_step": run.get("current_step") or {},
+            "completed": run.get("completed") or {}, "remaining_seconds": run.get("remaining_seconds", 0),
+            "attempt": run.get("attempt", 1)}
+
+
+def _list_voices() -> list[str]:
+    d = os.environ.get("PERSONAPLEX_VOICES_DIR", "")
+    if d and os.path.isdir(d):
+        return sorted(f.name for f in Path(d).glob("*.pt"))
+    return ["NATF2.pt"]
+
+
+def _list_engines() -> list[str]:
+    engines = ["meanvc"]
+    if (WORKSPACE / "X-VC").exists():
+        engines.append("xvc")
+    return engines
 
 
 def build_study_router() -> APIRouter:
@@ -117,72 +124,117 @@ def build_study_router() -> APIRouter:
     TARGETS_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # =============================== ADMIN ===============================
-    @router.get("/config", dependencies=[Depends(require_admin)])
-    async def get_config():
-        study = _active_study_or_default(backend)
-        return {"study_id": study["id"], "name": study["name"], "config": study["config"],
+    def _study_detail(study: dict) -> dict:
+        return {**study,
+                "scenarios": backend.list_scenarios(study["id"]),
                 "targets": backend.list_targets(study["id"]),
                 "participants": backend.list_participants(study["id"])}
 
-    @router.put("/config", dependencies=[Depends(require_admin)])
-    async def put_config(config: StudyConfig):
-        study = backend.upsert_active_study(config.name, config.model_dump())
-        return {"study_id": study["id"], "config": study["config"]}
+    # =============================== ADMIN ===============================
+    @router.get("/voices", dependencies=[Depends(require_admin)])
+    async def voices():
+        return {"voices": _list_voices()}
 
-    @router.post("/targets", dependencies=[Depends(require_admin)])
-    async def upload_target(wav: UploadFile = File(...), ref: str = Form(...),
-                            speaker_id: str = Form(""), label: str = Form("")):
-        study = _active_study_or_default(backend)
-        TARGETS_DIR.mkdir(parents=True, exist_ok=True)
-        dest = TARGETS_DIR / f"study{study['id']}_{ref}.wav"
-        with open(dest, "wb") as f:
-            shutil.copyfileobj(wav.file, f)
-        t = backend.add_target(study["id"], ref, speaker_id or ref, label or wav.filename or ref, str(dest))
-        return {"target": t}
-
-    @router.post("/activate", dependencies=[Depends(require_admin)])
-    async def activate():
-        study = _active_study_or_default(backend)
-        backend.set_active(study["id"])
-        return {"study_id": study["id"], "active": True}
+    @router.get("/engines", dependencies=[Depends(require_admin)])
+    async def engines():
+        return {"engines": _list_engines()}
 
     @router.post("/stop-engine", dependencies=[Depends(require_admin)])
     async def stop_engine():
         manager.stop_engine()
         return {"engine": "stopped"}
 
-    @router.post("/participants/generate", dependencies=[Depends(require_admin)])
-    async def gen_participants(body: GenerateRequest):
-        study = _active_study_or_default(backend)
-        n_cond = len(_conditions(study))
-        order = list(range(1, n_cond + 1)) if n_cond else [1, 2, 3, 4]
-        created = backend.generate_participants(study["id"], max(1, body.count), order)
+    @router.get("/studies", dependencies=[Depends(require_admin)])
+    async def list_studies():
+        return {"studies": backend.list_studies()}
+
+    @router.post("/studies", dependencies=[Depends(require_admin)])
+    async def create_study(body: CreateStudyRequest):
+        study = backend.create_study(body.name, body.description)
+        backend.update_study(study["id"], None, None, default_questionnaires())
+        return {"study": _study_detail(backend.get_study(study["id"]))}
+
+    @router.get("/studies/{study_id}", dependencies=[Depends(require_admin)])
+    async def get_study(study_id: int):
+        study = backend.get_study(study_id)
+        if not study:
+            raise HTTPException(status_code=404, detail="Unknown study")
+        return {"study": _study_detail(study)}
+
+    @router.put("/studies/{study_id}", dependencies=[Depends(require_admin)])
+    async def update_study(study_id: int, body: UpdateStudyRequest):
+        study = backend.update_study(study_id, body.name, body.description, None)
+        return {"study": _study_detail(study)}
+
+    @router.delete("/studies/{study_id}", dependencies=[Depends(require_admin)])
+    async def archive_study(study_id: int):
+        backend.archive_study(study_id, True)
+        return {"ok": True}
+
+    @router.put("/studies/{study_id}/questionnaires", dependencies=[Depends(require_admin)])
+    async def set_questionnaires(study_id: int, body: dict):
+        backend.update_study(study_id, None, None, body.get("questionnaires", body))
+        return {"study": _study_detail(backend.get_study(study_id))}
+
+    @router.post("/studies/{study_id}/scenarios", dependencies=[Depends(require_admin)])
+    async def add_scenario(study_id: int, body: Scenario):
+        return {"scenario": backend.add_scenario(study_id, body.model_dump())}
+
+    @router.put("/studies/{study_id}/scenarios/{scenario_id}", dependencies=[Depends(require_admin)])
+    async def update_scenario(study_id: int, scenario_id: int, body: Scenario):
+        return {"scenario": backend.update_scenario(scenario_id, body.model_dump())}
+
+    @router.delete("/studies/{study_id}/scenarios/{scenario_id}", dependencies=[Depends(require_admin)])
+    async def delete_scenario(study_id: int, scenario_id: int):
+        backend.delete_scenario(scenario_id)
+        return {"ok": True}
+
+    @router.post("/studies/{study_id}/targets", dependencies=[Depends(require_admin)])
+    async def upload_target(study_id: int, wav: UploadFile = File(...), ref: str = Form(...),
+                            speaker_id: str = Form(""), label: str = Form(""), engine: str = Form("meanvc")):
+        d = TARGETS_DIR / f"study{study_id}"
+        d.mkdir(parents=True, exist_ok=True)
+        dest = d / f"{ref}.wav"
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(wav.file, f)
+        t = backend.add_target(study_id, ref, speaker_id or ref, label or wav.filename or ref, str(dest), engine)
+        return {"target": t}
+
+    @router.delete("/studies/{study_id}/targets/{target_id}", dependencies=[Depends(require_admin)])
+    async def delete_target(study_id: int, target_id: int):
+        backend.delete_target(target_id)
+        return {"ok": True}
+
+    @router.post("/studies/{study_id}/participants/generate", dependencies=[Depends(require_admin)])
+    async def gen_participants(study_id: int, body: GenerateRequest):
+        scenario_ids = [s["id"] for s in backend.list_scenarios(study_id)]
+        if not scenario_ids:
+            raise HTTPException(status_code=400, detail="Add at least one scenario first")
+        created = backend.generate_participants(study_id, max(1, body.count), scenario_ids)
         return {"participants": created}
 
-    @router.get("/runs", dependencies=[Depends(require_admin)])
-    async def list_runs():
-        study = _active_study_or_default(backend)
-        return {"runs": backend.list_runs(study["id"])}
+    @router.get("/studies/{study_id}/runs", dependencies=[Depends(require_admin)])
+    async def list_runs(study_id: int):
+        return {"runs": backend.list_runs(study_id)}
 
-    @router.get("/sessions", dependencies=[Depends(require_admin)])
-    async def list_sessions():
-        study = _active_study_or_default(backend)
-        return {"sessions": backend.list_sessions(study["id"])}
+    @router.get("/studies/{study_id}/sessions", dependencies=[Depends(require_admin)])
+    async def list_sessions(study_id: int):
+        return {"sessions": backend.list_sessions(study_id)}
 
-    @router.get("/export", dependencies=[Depends(require_admin)])
-    async def export(format: str = "json"):
-        study = _active_study_or_default(backend)
+    @router.get("/studies/{study_id}/export", dependencies=[Depends(require_admin)])
+    async def export(study_id: int, format: str = "json"):
+        study = backend.get_study(study_id)
         data = {
-            "study": {"id": study["id"], "name": study["name"], "config": study["config"]},
-            "participants": backend.list_participants(study["id"]),
-            "runs": backend.list_runs(study["id"]),
-            "sessions": backend.list_sessions(study["id"]),
-            "answers": backend.list_answers(study["id"]),
+            "study": study,
+            "scenarios": backend.list_scenarios(study_id),
+            "targets": backend.list_targets(study_id),
+            "participants": backend.list_participants(study_id),
+            "runs": backend.list_runs(study_id),
+            "sessions": backend.list_sessions(study_id),
+            "answers": backend.list_answers(study_id),
         }
         if format == "json":
             return JSONResponse(data)
-        # zip: metadata JSON + all session artifact files
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("study_export.json", json.dumps(data, indent=2))
@@ -192,7 +244,7 @@ def build_study_router() -> APIRouter:
                         z.write(p, str(p.relative_to(STUDY_DATA_DIR)))
         buf.seek(0)
         return StreamingResponse(buf, media_type="application/zip",
-                                 headers={"Content-Disposition": "attachment; filename=study_export.zip"})
+                                 headers={"Content-Disposition": f"attachment; filename=study{study_id}_export.zip"})
 
     # ============================ PARTICIPANT ============================
     def _require_participant(code: str) -> dict:
@@ -204,27 +256,29 @@ def build_study_router() -> APIRouter:
     @router.post("/enter")
     async def enter(body: EnterRequest):
         p = _require_participant(body.code)
-        study = backend.get_study(p["study_id"]) or _active_study_or_default(backend)
-        order = p.get("condition_order") or []
-        scenarios = [_scenario_card_for_participant(study, p, i + 1) for i in range(len(order))]
+        study = backend.get_study(p["study_id"])
+        if not study:
+            raise HTTPException(status_code=404, detail="Study not found")
+        order = p.get("scenario_order") or []
+        scenarios = []
+        for i, sid in enumerate(order):
+            sc = backend.get_scenario(sid)
+            if sc:
+                scenarios.append(_scenario_card(sc, i + 1))
         run = backend.get_latest_run(p["participant_id"])
-        questionnaires = (study.get("config") or {}).get("questionnaires", {})
         return {"participant_id": p["participant_id"], "study_name": study["name"],
-                "scenarios": scenarios, "questionnaires": questionnaires,
+                "scenarios": scenarios, "questionnaires": study.get("questionnaires") or {},
                 "run": _run_public(run)}
 
     @router.post("/run/start")
     async def run_start(body: RunStartRequest):
         p = _require_participant(body.code)
-        study = backend.get_study(p["study_id"]) or _active_study_or_default(backend)
-        # Single-live-run guard: block if another participant holds the lock.
-        live = backend.get_live_run(study["id"])
+        live = backend.get_live_run(p["study_id"])
         if live and live["participant_id"] != p["participant_id"]:
             raise HTTPException(status_code=409,
                                 detail="Another session is in progress, please try again shortly.")
         run = backend.start_run(p["participant_id"], body.mode)
-        manager.start_prepare_async(backend, study)
-        return {"run": _run_public(run), "prepare": manager.get_state()}
+        return {"run": _run_public(run)}
 
     @router.get("/run/prepare/status")
     async def prepare_status():
@@ -239,7 +293,7 @@ def build_study_router() -> APIRouter:
                 if state["version"] != last:
                     last = state["version"]
                     yield f"data: {json.dumps(state)}\n\n"
-                if state["status"] in ("ready", "error"):
+                if state["status"] in ("ready", "error", "idle"):
                     break
                 await asyncio.sleep(0.4)
         return StreamingResponse(gen(), media_type="text/event-stream",
@@ -275,20 +329,31 @@ def build_study_router() -> APIRouter:
     async def session_start(body: SessionStartRequest):
         p = _require_participant(body.code)
         _guard_window(p["participant_id"])
-        study = backend.get_study(p["study_id"]) or _active_study_or_default(backend)
-        cond, target = _resolve_for_order(backend, study, p, body.scenario_order)
+        scenario = _resolve_scenario(backend, p, body.scenario_order)
+        engine = _scenario_engine(scenario)
+        # Prepare the engine this scenario needs (may restart :5002); the client
+        # watches the prepare SSE and connects only when ready.
+        manager.start_prepare_async(backend, p["study_id"], engine)
+
         session_id = f"{p['participant_id']}_S{body.scenario_order:02d}"
-        voice_condition = cond.get("voice_mode", "")
-        target_speaker = (target or {}).get("speaker_id", "") if cond.get("voice_mode") == "vc" else ""
-        backend.create_session(session_id, p["participant_id"], f"scenario_{cond['idx']}",
-                               body.scenario_order, voice_condition, target_speaker)
-        return {"session_id": session_id,
-                "scenario": _scenario_card_for_participant(study, p, body.scenario_order)}
+        # target speaker id from the first vc segment (for metadata)
+        target_speaker = ""
+        for seg in scenario.get("voice_schedule") or []:
+            if seg.get("mode") == "vc" and seg.get("target_ref"):
+                for t in backend.list_targets(p["study_id"]):
+                    if t["ref"] == seg["target_ref"]:
+                        target_speaker = t["speaker_id"]
+                        break
+                break
+        backend.create_session(session_id, p["participant_id"], f"scenario_{scenario['id']}",
+                               body.scenario_order, _schedule_label(scenario), target_speaker)
+        return {"session_id": session_id, "scenario": _scenario_card(scenario, body.scenario_order),
+                "prepare": manager.get_state()}
 
     @router.get("/condition/{session_id}")
     async def get_condition(session_id: str):
-        """Internal: called by the active VC engine over localhost to resolve the
-        hidden prompt/target. Not for the browser."""
+        """Internal: the active VC engine resolves the hidden prompt + voice
+        schedule here (localhost). Never called by the browser."""
         session = backend.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Unknown session")
@@ -297,27 +362,30 @@ def build_study_router() -> APIRouter:
         p = participants.get(session["participant_id"])
         if not p or not study:
             raise HTTPException(status_code=404, detail="Unknown participant/study")
-        cond, target = _resolve_for_order(backend, study, p, session["scenario_order"])
-        default_voice = (study.get("config") or {}).get("default_voice_prompt", "NATF2.pt")
-        return {
-            "voice_mode": cond.get("voice_mode", "vc"),
-            "text_prompt": cond.get("system_prompt", ""),
-            "voice_prompt": cond.get("voice_prompt") or default_voice,
-            "engine_target_id": (target or {}).get("engine_target_id") if cond.get("voice_mode") == "vc" else None,
-            "steps": cond.get("steps", 8),
-        }
+        scenario = _resolve_scenario(backend, p, session["scenario_order"])
+        targets = {t["ref"]: t for t in backend.list_targets(session["study_id"])}
+
+        schedule = scenario.get("voice_schedule") or [{"mode": "natural", "start_s": 0, "end_s": None}]
+        resolved = []
+        for seg in schedule:
+            r = {"mode": seg.get("mode", "natural"), "start_s": seg.get("start_s", 0),
+                 "end_s": seg.get("end_s")}
+            if seg.get("mode") == "vc":
+                t = targets.get(seg.get("target_ref"))
+                r["engine_target_id"] = (t or {}).get("engine_target_id")
+            resolved.append(r)
+        default_voice = os.environ.get("STUDY_DEFAULT_VOICE_PROMPT", "NATF2.pt")
+        return {"text_prompt": scenario.get("system_prompt", ""),
+                "voice_prompt": scenario.get("voice_prompt") or default_voice,
+                "schedule": resolved}
 
     @router.post("/session/{session_id}/save")
-    async def session_save(session_id: str,
-                           background_tasks: BackgroundTasks,
+    async def session_save(session_id: str, background_tasks: BackgroundTasks,
                            participant: UploadFile | None = File(None),
                            participant_raw: UploadFile | None = File(None),
                            model: UploadFile | None = File(None),
                            merged: UploadFile | None = File(None),
                            model_transcript: str = Form("null")):
-        """Saves the audio + metadata immediately and returns fast. Transcription
-        and VC-quality metrics run in the background so the participant advances
-        without waiting (they can be minutes on the first run)."""
         session = backend.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Unknown session")
@@ -340,7 +408,6 @@ def build_study_router() -> APIRouter:
             "files": files,
         }
         (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
-        # Persist audio + the model turns immediately; analysis fills in the rest.
         backend.save_session(session_id, files, {"model": model_turns, "participant": None}, None, False)
 
         converted_path = str(out_dir / "participant.wav") if participant is not None else None
@@ -350,10 +417,9 @@ def build_study_router() -> APIRouter:
 
     @router.post("/session/{session_id}/end")
     async def session_end(session_id: str, body: dict):
-        reason = body.get("reason", "goal_reached")
         if not backend.get_session(session_id):
             raise HTTPException(status_code=404, detail="Unknown session")
-        backend.end_session(session_id, reason)
+        backend.end_session(session_id, body.get("reason", "goal_reached"))
         return {"ok": True}
 
     @router.post("/session/{session_id}/questionnaire")

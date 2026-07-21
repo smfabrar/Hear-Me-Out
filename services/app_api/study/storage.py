@@ -1,9 +1,13 @@
-"""Persistence for the study platform.
+"""Persistence for the study platform (v2 — multi-study).
 
 `StorageBackend` is the interface; `SqliteBackend` is the pilot implementation
 (one SQLite file, WAV/JSON artifacts on disk). A future `MongoBackend` can
-implement the same interface without touching the router. Rows are returned as
-plain dicts (JSON columns already decoded) to keep the interface backend-neutral.
+implement the same interface. Rows are returned as plain dicts (JSON columns
+decoded, with the `_json` suffix stripped) to stay backend-neutral.
+
+Studies are independent (no "single active study"); a participant code maps to
+exactly one study. Scenarios are first-class rows with a per-scenario voice
+schedule; targets carry the VC engine they belong to.
 """
 
 from __future__ import annotations
@@ -18,10 +22,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-# A study run must be submitted within this window from (re)start; otherwise it
-# expires and the participant may resume (keeping completed scenarios, fresh
-# window) or restart.
 RUN_WINDOW_SECONDS = 3600
+SCHEMA_VERSION = 2
 
 
 def _now() -> float:
@@ -29,33 +31,49 @@ def _now() -> float:
 
 
 class StorageBackend(abc.ABC):
-    # --- study config ---
+    # studies
     @abc.abstractmethod
-    def get_active_study(self) -> Optional[dict]: ...
+    def create_study(self, name: str, description: str = "") -> dict: ...
+    @abc.abstractmethod
+    def list_studies(self) -> list[dict]: ...
     @abc.abstractmethod
     def get_study(self, study_id: int) -> Optional[dict]: ...
     @abc.abstractmethod
-    def upsert_active_study(self, name: str, config: dict) -> dict: ...
+    def update_study(self, study_id: int, name: Optional[str], description: Optional[str],
+                     questionnaires: Optional[dict]) -> Optional[dict]: ...
     @abc.abstractmethod
-    def set_active(self, study_id: int) -> None: ...
-
-    # --- targets ---
+    def archive_study(self, study_id: int, archived: bool = True) -> None: ...
+    # scenarios
     @abc.abstractmethod
-    def add_target(self, study_id: int, ref: str, speaker_id: str, label: str, wav_path: str) -> dict: ...
+    def list_scenarios(self, study_id: int) -> list[dict]: ...
+    @abc.abstractmethod
+    def get_scenario(self, scenario_id: int) -> Optional[dict]: ...
+    @abc.abstractmethod
+    def add_scenario(self, study_id: int, data: dict) -> dict: ...
+    @abc.abstractmethod
+    def update_scenario(self, scenario_id: int, data: dict) -> Optional[dict]: ...
+    @abc.abstractmethod
+    def delete_scenario(self, scenario_id: int) -> None: ...
+    # targets
+    @abc.abstractmethod
+    def add_target(self, study_id: int, ref: str, speaker_id: str, label: str,
+                   wav_path: str, engine: str) -> dict: ...
     @abc.abstractmethod
     def list_targets(self, study_id: int) -> list[dict]: ...
     @abc.abstractmethod
-    def set_engine_target_id(self, target_id: int, engine_target_id: Optional[str]) -> None: ...
-
-    # --- participants ---
+    def delete_target(self, target_id: int) -> None: ...
     @abc.abstractmethod
-    def generate_participants(self, study_id: int, count: int, condition_order: list[int]) -> list[dict]: ...
+    def set_engine_target_id(self, target_id: int, engine_target_id: Optional[str]) -> None: ...
+    @abc.abstractmethod
+    def clear_engine_target_ids(self, study_id: int, engine: str) -> None: ...
+    # participants
+    @abc.abstractmethod
+    def generate_participants(self, study_id: int, count: int, scenario_order: list[int]) -> list[dict]: ...
     @abc.abstractmethod
     def get_participant_by_code(self, code: str) -> Optional[dict]: ...
     @abc.abstractmethod
     def list_participants(self, study_id: int) -> list[dict]: ...
-
-    # --- runs ---
+    # runs
     @abc.abstractmethod
     def get_latest_run(self, participant_id: str) -> Optional[dict]: ...
     @abc.abstractmethod
@@ -68,8 +86,7 @@ class StorageBackend(abc.ABC):
     def get_live_run(self, study_id: int) -> Optional[dict]: ...
     @abc.abstractmethod
     def list_runs(self, study_id: int) -> list[dict]: ...
-
-    # --- sessions (one scenario call) ---
+    # sessions
     @abc.abstractmethod
     def create_session(self, session_id: str, participant_id: str, scenario_id: str,
                        scenario_order: int, voice_condition: str, target_speaker_id: str) -> dict: ...
@@ -85,8 +102,7 @@ class StorageBackend(abc.ABC):
     def get_session(self, session_id: str) -> Optional[dict]: ...
     @abc.abstractmethod
     def list_sessions(self, study_id: int) -> list[dict]: ...
-
-    # --- questionnaire answers ---
+    # answers
     @abc.abstractmethod
     def save_answer(self, participant_id: str, session_id: Optional[str], kind: str, payload: Any) -> None: ...
     @abc.abstractmethod
@@ -94,12 +110,25 @@ class StorageBackend(abc.ABC):
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS study (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL DEFAULT '',
-  active INTEGER NOT NULL DEFAULT 0,
-  config_json TEXT NOT NULL DEFAULT '{}',
+  description TEXT NOT NULL DEFAULT '',
+  questionnaires_json TEXT NOT NULL DEFAULT '{}',
+  archived INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scenario (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  study_id INTEGER NOT NULL,
+  order_idx INTEGER NOT NULL DEFAULT 0,
+  title TEXT NOT NULL DEFAULT '',
+  scenario_card_json TEXT NOT NULL DEFAULT '{}',
+  system_prompt TEXT NOT NULL DEFAULT '',
+  voice_prompt TEXT NOT NULL DEFAULT '',
+  voice_schedule_json TEXT NOT NULL DEFAULT '[]',
+  time_limit_s INTEGER NOT NULL DEFAULT 300
 );
 CREATE TABLE IF NOT EXISTS target (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +137,7 @@ CREATE TABLE IF NOT EXISTS target (
   speaker_id TEXT NOT NULL DEFAULT '',
   label TEXT NOT NULL DEFAULT '',
   wav_path TEXT NOT NULL,
+  engine TEXT NOT NULL DEFAULT 'meanvc',
   engine_target_id TEXT,
   UNIQUE(study_id, ref)
 );
@@ -115,7 +145,7 @@ CREATE TABLE IF NOT EXISTS participant (
   participant_id TEXT PRIMARY KEY,
   code TEXT NOT NULL UNIQUE,
   study_id INTEGER NOT NULL,
-  condition_order_json TEXT NOT NULL DEFAULT '[]',
+  scenario_order_json TEXT NOT NULL DEFAULT '[]',
   created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS run (
@@ -162,10 +192,11 @@ def _loads(row: sqlite3.Row, json_cols: tuple[str, ...]) -> dict:
     d = dict(row)
     for c in json_cols:
         if c in d and d[c] is not None:
+            key = c[:-5] if c.endswith("_json") else c
             try:
-                d[c[:-5] if c.endswith("_json") else c] = json.loads(d[c])
+                d[key] = json.loads(d[c])
             except (json.JSONDecodeError, TypeError):
-                d[c[:-5] if c.endswith("_json") else c] = None
+                d[key] = None
     return d
 
 
@@ -173,170 +204,241 @@ class SqliteBackend(StorageBackend):
     def __init__(self, db_path: str):
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def _init_schema(self):
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            row = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            if row is None:
+                c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+                          (str(SCHEMA_VERSION),))
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA foreign_keys=ON;")
         try:
             yield conn
             conn.commit()
         finally:
             conn.close()
 
-    # --- study config ---
-    def get_active_study(self) -> Optional[dict]:
+    # ---------- studies ----------
+    def create_study(self, name, description="") -> dict:
         with self._conn() as c:
-            row = c.execute("SELECT * FROM study WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
-        return _loads(row, ("config_json",)) if row else None
-
-    def get_study(self, study_id: int) -> Optional[dict]:
-        with self._conn() as c:
-            row = c.execute("SELECT * FROM study WHERE id=?", (study_id,)).fetchone()
-        return _loads(row, ("config_json",)) if row else None
-
-    def upsert_active_study(self, name: str, config: dict) -> dict:
-        """Update the active study's config, or create the first study if none exists."""
-        with self._conn() as c:
-            row = c.execute("SELECT id FROM study WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
-            if row:
-                c.execute("UPDATE study SET name=?, config_json=? WHERE id=?",
-                          (name, json.dumps(config), row["id"]))
-                sid = row["id"]
-            else:
-                cur = c.execute("INSERT INTO study(name, active, config_json, created_at) VALUES(?,1,?,?)",
-                                (name, json.dumps(config), _now()))
-                sid = cur.lastrowid
+            cur = c.execute("INSERT INTO study(name, description, questionnaires_json, created_at) "
+                            "VALUES(?,?,?,?)", (name, description, "{}", _now()))
+            sid = cur.lastrowid
         return self.get_study(sid)
 
-    def set_active(self, study_id: int) -> None:
+    def list_studies(self) -> list[dict]:
         with self._conn() as c:
-            c.execute("UPDATE study SET active=0")
-            c.execute("UPDATE study SET active=1 WHERE id=?", (study_id,))
+            rows = c.execute("SELECT * FROM study ORDER BY archived, id DESC").fetchall()
+        return [_loads(r, ("questionnaires_json",)) for r in rows]
 
-    # --- targets ---
-    def add_target(self, study_id: int, ref: str, speaker_id: str, label: str, wav_path: str) -> dict:
+    def get_study(self, study_id) -> Optional[dict]:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM study WHERE id=?", (study_id,)).fetchone()
+        return _loads(row, ("questionnaires_json",)) if row else None
+
+    def update_study(self, study_id, name, description, questionnaires) -> Optional[dict]:
+        with self._conn() as c:
+            if name is not None:
+                c.execute("UPDATE study SET name=? WHERE id=?", (name, study_id))
+            if description is not None:
+                c.execute("UPDATE study SET description=? WHERE id=?", (description, study_id))
+            if questionnaires is not None:
+                c.execute("UPDATE study SET questionnaires_json=? WHERE id=?",
+                          (json.dumps(questionnaires), study_id))
+        return self.get_study(study_id)
+
+    def archive_study(self, study_id, archived=True) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE study SET archived=? WHERE id=?", (1 if archived else 0, study_id))
+
+    # ---------- scenarios ----------
+    def list_scenarios(self, study_id) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM scenario WHERE study_id=? ORDER BY order_idx, id",
+                             (study_id,)).fetchall()
+        return [_loads(r, ("scenario_card_json", "voice_schedule_json")) for r in rows]
+
+    def get_scenario(self, scenario_id) -> Optional[dict]:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM scenario WHERE id=?", (scenario_id,)).fetchone()
+        return _loads(row, ("scenario_card_json", "voice_schedule_json")) if row else None
+
+    def _scenario_cols(self, data: dict) -> dict:
+        return {
+            "order_idx": data.get("order_idx", 0),
+            "title": data.get("title", ""),
+            "scenario_card_json": json.dumps(data.get("scenario_card", {})),
+            "system_prompt": data.get("system_prompt", ""),
+            "voice_prompt": data.get("voice_prompt", ""),
+            "voice_schedule_json": json.dumps(data.get("voice_schedule", [])),
+            "time_limit_s": int(data.get("time_limit_s", 300)),
+        }
+
+    def add_scenario(self, study_id, data) -> dict:
+        cols = self._scenario_cols(data)
+        with self._conn() as c:
+            if "order_idx" not in data:
+                n = c.execute("SELECT COUNT(*) AS n FROM scenario WHERE study_id=?", (study_id,)).fetchone()["n"]
+                cols["order_idx"] = n
+            cur = c.execute(
+                "INSERT INTO scenario(study_id, order_idx, title, scenario_card_json, system_prompt, "
+                "voice_prompt, voice_schedule_json, time_limit_s) VALUES(?,?,?,?,?,?,?,?)",
+                (study_id, cols["order_idx"], cols["title"], cols["scenario_card_json"],
+                 cols["system_prompt"], cols["voice_prompt"], cols["voice_schedule_json"],
+                 cols["time_limit_s"]))
+            sid = cur.lastrowid
+        return self.get_scenario(sid)
+
+    def update_scenario(self, scenario_id, data) -> Optional[dict]:
+        cols = self._scenario_cols(data)
         with self._conn() as c:
             c.execute(
-                "INSERT INTO target(study_id, ref, speaker_id, label, wav_path) VALUES(?,?,?,?,?) "
+                "UPDATE scenario SET order_idx=?, title=?, scenario_card_json=?, system_prompt=?, "
+                "voice_prompt=?, voice_schedule_json=?, time_limit_s=? WHERE id=?",
+                (cols["order_idx"], cols["title"], cols["scenario_card_json"], cols["system_prompt"],
+                 cols["voice_prompt"], cols["voice_schedule_json"], cols["time_limit_s"], scenario_id))
+        return self.get_scenario(scenario_id)
+
+    def delete_scenario(self, scenario_id) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM scenario WHERE id=?", (scenario_id,))
+
+    # ---------- targets ----------
+    def add_target(self, study_id, ref, speaker_id, label, wav_path, engine) -> dict:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO target(study_id, ref, speaker_id, label, wav_path, engine) VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(study_id, ref) DO UPDATE SET speaker_id=excluded.speaker_id, "
-                "label=excluded.label, wav_path=excluded.wav_path, engine_target_id=NULL",
-                (study_id, ref, speaker_id, label, wav_path))
+                "label=excluded.label, wav_path=excluded.wav_path, engine=excluded.engine, engine_target_id=NULL",
+                (study_id, ref, speaker_id, label, wav_path, engine))
             row = c.execute("SELECT * FROM target WHERE study_id=? AND ref=?", (study_id, ref)).fetchone()
         return dict(row)
 
-    def list_targets(self, study_id: int) -> list[dict]:
+    def list_targets(self, study_id) -> list[dict]:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM target WHERE study_id=? ORDER BY id", (study_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def set_engine_target_id(self, target_id: int, engine_target_id: Optional[str]) -> None:
+    def delete_target(self, target_id) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM target WHERE id=?", (target_id,))
+
+    def set_engine_target_id(self, target_id, engine_target_id) -> None:
         with self._conn() as c:
             c.execute("UPDATE target SET engine_target_id=? WHERE id=?", (engine_target_id, target_id))
 
-    # --- participants ---
-    def generate_participants(self, study_id: int, count: int, condition_order: list[int]) -> list[dict]:
+    def clear_engine_target_ids(self, study_id, engine) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE target SET engine_target_id=NULL WHERE study_id=? AND engine=?",
+                      (study_id, engine))
+
+    # ---------- participants ----------
+    def generate_participants(self, study_id, count, scenario_order) -> list[dict]:
         created = []
         with self._conn() as c:
             n = c.execute("SELECT COUNT(*) AS n FROM participant WHERE study_id=?", (study_id,)).fetchone()["n"]
             for i in range(count):
-                pid = f"P{n + i + 1:04d}"
+                pid = f"P{study_id:02d}{n + i + 1:03d}"
                 code = _gen_code()
                 while c.execute("SELECT 1 FROM participant WHERE code=?", (code,)).fetchone():
                     code = _gen_code()
-                c.execute(
-                    "INSERT INTO participant(participant_id, code, study_id, condition_order_json, created_at) "
-                    "VALUES(?,?,?,?,?)",
-                    (pid, code, study_id, json.dumps(condition_order), _now()))
-                created.append({"participant_id": pid, "code": code, "condition_order": condition_order})
+                c.execute("INSERT INTO participant(participant_id, code, study_id, scenario_order_json, "
+                          "created_at) VALUES(?,?,?,?,?)",
+                          (pid, code, study_id, json.dumps(scenario_order), _now()))
+                created.append({"participant_id": pid, "code": code, "scenario_order": scenario_order})
         return created
 
-    def get_participant_by_code(self, code: str) -> Optional[dict]:
+    def get_participant_by_code(self, code) -> Optional[dict]:
         with self._conn() as c:
             row = c.execute("SELECT * FROM participant WHERE code=?", (code.strip(),)).fetchone()
-        return _loads(row, ("condition_order_json",)) if row else None
+        return _loads(row, ("scenario_order_json",)) if row else None
 
-    def list_participants(self, study_id: int) -> list[dict]:
+    def _participant_by_id(self, c, participant_id) -> Optional[dict]:
+        row = c.execute("SELECT * FROM participant WHERE participant_id=?", (participant_id,)).fetchone()
+        return _loads(row, ("scenario_order_json",)) if row else None
+
+    def list_participants(self, study_id) -> list[dict]:
         with self._conn() as c:
-            rows = c.execute("SELECT * FROM participant WHERE study_id=? ORDER BY participant_id", (study_id,)).fetchall()
-        return [_loads(r, ("condition_order_json",)) for r in rows]
+            rows = c.execute("SELECT * FROM participant WHERE study_id=? ORDER BY participant_id",
+                             (study_id,)).fetchall()
+        return [_loads(r, ("scenario_order_json",)) for r in rows]
 
-    # --- runs ---
-    def get_latest_run(self, participant_id: str) -> Optional[dict]:
+    # ---------- runs ----------
+    def get_latest_run(self, participant_id) -> Optional[dict]:
         with self._conn() as c:
             row = c.execute("SELECT * FROM run WHERE participant_id=? ORDER BY attempt DESC LIMIT 1",
                             (participant_id,)).fetchone()
         return self._run_dict(row) if row else None
 
-    def start_run(self, participant_id: str, mode: str) -> dict:
+    def start_run(self, participant_id, mode) -> dict:
         now = _now()
         expires = now + RUN_WINDOW_SECONDS
         with self._conn() as c:
-            prow = c.execute("SELECT study_id FROM participant WHERE participant_id=?", (participant_id,)).fetchone()
+            prow = c.execute("SELECT study_id FROM participant WHERE participant_id=?",
+                             (participant_id,)).fetchone()
             study_id = prow["study_id"]
             latest = c.execute("SELECT * FROM run WHERE participant_id=? ORDER BY attempt DESC LIMIT 1",
                                (participant_id,)).fetchone()
             resumable = latest and mode == "resume" and latest["status"] in ("in_progress", "expired")
             if resumable:
-                # Keep completed scenarios + current step; fresh window.
                 c.execute("UPDATE run SET status='in_progress', started_at=?, expires_at=?, submitted_at=NULL "
                           "WHERE id=?", (now, expires, latest["id"]))
                 rid = latest["id"]
             else:
                 attempt = (latest["attempt"] + 1) if latest else 1
-                cur = c.execute(
-                    "INSERT INTO run(participant_id, study_id, attempt, status, current_step_json, "
-                    "completed_json, started_at, expires_at) VALUES(?,?,?,?,?,?,?,?)",
-                    (participant_id, study_id, attempt, "in_progress", "{}", "{}", now, expires))
+                cur = c.execute("INSERT INTO run(participant_id, study_id, attempt, status, current_step_json, "
+                                "completed_json, started_at, expires_at) VALUES(?,?,?,?,?,?,?,?)",
+                                (participant_id, study_id, attempt, "in_progress", "{}", "{}", now, expires))
                 rid = cur.lastrowid
             row = c.execute("SELECT * FROM run WHERE id=?", (rid,)).fetchone()
         return self._run_dict(row)
 
-    def update_run_progress(self, run_id: int, current_step: dict, completed: dict) -> None:
+    def update_run_progress(self, run_id, current_step, completed) -> None:
         with self._conn() as c:
             c.execute("UPDATE run SET current_step_json=?, completed_json=? WHERE id=?",
                       (json.dumps(current_step), json.dumps(completed), run_id))
 
-    def submit_run(self, run_id: int) -> None:
+    def submit_run(self, run_id) -> None:
         with self._conn() as c:
             c.execute("UPDATE run SET status='submitted', submitted_at=? WHERE id=?", (_now(), run_id))
 
-    def get_live_run(self, study_id: int) -> Optional[dict]:
-        """A run currently holding the single-live-run lock (in_progress, not yet expired)."""
+    def get_live_run(self, study_id) -> Optional[dict]:
+        # A live run holds the single-GPU lock regardless of which study it belongs to.
         with self._conn() as c:
-            row = c.execute(
-                "SELECT * FROM run WHERE study_id=? AND status='in_progress' AND expires_at > ? "
-                "ORDER BY started_at DESC LIMIT 1", (study_id, _now())).fetchone()
+            row = c.execute("SELECT * FROM run WHERE status='in_progress' AND expires_at > ? "
+                            "ORDER BY started_at DESC LIMIT 1", (_now(),)).fetchone()
         return self._run_dict(row) if row else None
 
-    def list_runs(self, study_id: int) -> list[dict]:
+    def list_runs(self, study_id) -> list[dict]:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM run WHERE study_id=? ORDER BY started_at DESC", (study_id,)).fetchall()
         return [self._run_dict(r) for r in rows]
 
-    def _run_dict(self, row: sqlite3.Row) -> dict:
+    def _run_dict(self, row) -> dict:
         d = _loads(row, ("current_step_json", "completed_json"))
-        # Reflect expiry lazily so callers see accurate status without a sweep.
         if d["status"] == "in_progress" and d["expires_at"] is not None and d["expires_at"] < _now():
             d["status"] = "expired"
         d["remaining_seconds"] = max(0, int(d["expires_at"] - _now())) if d.get("expires_at") else 0
         return d
 
-    # --- sessions ---
+    # ---------- sessions ----------
     def create_session(self, session_id, participant_id, scenario_id, scenario_order,
                         voice_condition, target_speaker_id) -> dict:
         with self._conn() as c:
-            prow = c.execute("SELECT study_id FROM participant WHERE participant_id=?", (participant_id,)).fetchone()
+            prow = c.execute("SELECT study_id FROM participant WHERE participant_id=?",
+                             (participant_id,)).fetchone()
             study_id = prow["study_id"]
-            c.execute(
-                "INSERT OR REPLACE INTO session(session_id, participant_id, study_id, scenario_id, "
-                "scenario_order, voice_condition, target_speaker_id, started_at) VALUES(?,?,?,?,?,?,?,?)",
-                (session_id, participant_id, study_id, scenario_id, scenario_order,
-                 voice_condition, target_speaker_id, _now()))
+            c.execute("INSERT OR REPLACE INTO session(session_id, participant_id, study_id, scenario_id, "
+                      "scenario_order, voice_condition, target_speaker_id, started_at) VALUES(?,?,?,?,?,?,?,?)",
+                      (session_id, participant_id, study_id, scenario_id, scenario_order,
+                       voice_condition, target_speaker_id, _now()))
             row = c.execute("SELECT * FROM session WHERE session_id=?", (session_id,)).fetchone()
         return dict(row)
 
@@ -369,10 +471,11 @@ class SqliteBackend(StorageBackend):
             rows = c.execute("SELECT * FROM session WHERE study_id=? ORDER BY started_at", (study_id,)).fetchall()
         return [_loads(r, ("files_json", "transcript_json", "metrics_json")) for r in rows]
 
-    # --- answers ---
+    # ---------- answers ----------
     def save_answer(self, participant_id, session_id, kind, payload) -> None:
         with self._conn() as c:
-            prow = c.execute("SELECT study_id FROM participant WHERE participant_id=?", (participant_id,)).fetchone()
+            prow = c.execute("SELECT study_id FROM participant WHERE participant_id=?",
+                             (participant_id,)).fetchone()
             study_id = prow["study_id"] if prow else 0
             c.execute("INSERT INTO answer(participant_id, study_id, session_id, kind, payload_json, created_at) "
                       "VALUES(?,?,?,?,?,?)",
@@ -385,7 +488,6 @@ class SqliteBackend(StorageBackend):
 
 
 def _gen_code() -> str:
-    """Human-typable participant code, avoiding ambiguous chars (0/O, 1/I/L)."""
     alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
     return "".join(secrets.choice(alphabet) for _ in range(6))
 
@@ -394,7 +496,6 @@ _backend: Optional[StorageBackend] = None
 
 
 def get_backend() -> StorageBackend:
-    """Process-wide backend singleton, selected by env (SQLite for the pilot)."""
     global _backend
     if _backend is None:
         kind = os.environ.get("STUDY_STORAGE", "sqlite").lower()

@@ -1,14 +1,10 @@
-"""VC-engine lifecycle manager for the study platform.
+"""VC-engine lifecycle manager (v2 — per-scenario engine).
 
-In study mode the VC engine (MeanVC or X-VC — same route surface) is NOT started
-at boot. It is brought up the first time a participant starts a run, via
-`ensure_ready`, which is idempotent and self-healing: start the engine if down,
-wait until it is reachable, (re)load the study's target voices capturing the
-engine-returned id per target, and verify PersonaPlex is up. Progress is exposed
-as a step list for the participant's "preparing your session…" screen.
-
-Engine start/stop is delegated to infra/vc_engine.sh so the launch logic has a
-single source of truth shared with run_all.sh.
+A scenario's voice schedule picks a VC engine (MeanVC or X-VC). Only one engine
+runs on :5002, so `ensure_engine` restarts it when a scenario needs a different
+one, then loads that scenario's targets. Natural-only scenarios still go through
+the proxy (to hide the prompt), so any engine that's already up is reused.
+Progress is exposed as a step list for the participant's "preparing" screen.
 """
 
 from __future__ import annotations
@@ -33,16 +29,16 @@ VC_ENGINE_SCRIPT = REPO_ROOT / "infra" / "vc_engine.sh"
 VC_HOST = os.environ.get("STUDY_VC_HOST", "127.0.0.1")
 VC_PORT = int(os.environ.get("MEANVC_PORT", "5002"))
 PPLX_PORT = int(os.environ.get("PERSONAPLEX_PROXY_PORT", os.environ.get("PERSONAPLEX_PORT", "8000")))
-
 ENGINE_START_TIMEOUT = int(os.environ.get("STUDY_ENGINE_START_TIMEOUT", "300"))
+DEFAULT_ENGINE = os.environ.get("VC_ENGINE", "meanvc")
 
 
 @dataclass
 class PrepareState:
     status: str = "idle"          # idle | preparing | ready | error
-    steps: list[dict] = field(default_factory=list)  # [{label, state: running|done|error}]
+    steps: list[dict] = field(default_factory=list)
     error: Optional[str] = None
-    version: int = 0              # bumped on every change so SSE clients can diff
+    version: int = 0
 
     def to_dict(self) -> dict:
         return {"status": self.status, "steps": self.steps, "error": self.error, "version": self.version}
@@ -58,13 +54,14 @@ def _port_open(host: str, port: int, timeout: float = 1.5) -> bool:
 
 class VCEngineManager:
     def __init__(self):
-        self._lock = threading.Lock()          # serializes prepare runs
+        self._lock = threading.Lock()
         self._state = PrepareState()
         self._state_lock = threading.Lock()
-        self._loaded = False                   # targets loaded for the current engine instance
+        self._current_engine: Optional[str] = None   # engine we started on :5002
+        self._loaded_engine: Optional[str] = None     # engine whose targets are loaded
         self._thread: Optional[threading.Thread] = None
 
-    # --- progress state ---
+    # ---- progress state ----
     def get_state(self) -> dict:
         with self._state_lock:
             return self._state.to_dict()
@@ -94,71 +91,81 @@ class VCEngineManager:
                 self._state.steps[idx]["state"] = state
                 self._state.version += 1
 
-    # --- engine control ---
+    # ---- engine control ----
     def is_engine_up(self) -> bool:
         return _port_open(VC_HOST, VC_PORT)
 
-    def _run_script(self, action: str) -> subprocess.CompletedProcess:
+    def _run_script(self, action: str, engine: Optional[str] = None) -> subprocess.CompletedProcess:
+        env = os.environ.copy()
+        if engine:
+            env["VC_ENGINE"] = engine
         return subprocess.run(["bash", str(VC_ENGINE_SCRIPT), action],
-                              capture_output=True, text=True, cwd=str(REPO_ROOT))
+                              capture_output=True, text=True, cwd=str(REPO_ROOT), env=env)
 
     def stop_engine(self) -> None:
         if VC_ENGINE_SCRIPT.exists():
             self._run_script("stop")
-        self._loaded = False
+        self._current_engine = None
+        self._loaded_engine = None
         self._set_status("idle")
 
-    def _start_engine_and_wait(self):
-        if not self.is_engine_up():
-            if not VC_ENGINE_SCRIPT.exists():
-                raise RuntimeError(f"VC engine launcher missing: {VC_ENGINE_SCRIPT}")
-            self._run_script("start")
-            self._loaded = False
-            deadline = time.time() + ENGINE_START_TIMEOUT
-            while time.time() < deadline:
-                if self.is_engine_up():
-                    return
-                time.sleep(2)
-            raise RuntimeError("VC engine did not become reachable in time")
+    def _restart_to(self, engine: str):
+        if not VC_ENGINE_SCRIPT.exists():
+            raise RuntimeError(f"VC engine launcher missing: {VC_ENGINE_SCRIPT}")
+        self._run_script("stop", engine)
+        deadline = time.time() + 30
+        while time.time() < deadline and self.is_engine_up():
+            time.sleep(1)
+        self._run_script("start", engine)
+        deadline = time.time() + ENGINE_START_TIMEOUT
+        while time.time() < deadline:
+            if self.is_engine_up():
+                self._current_engine = engine
+                self._loaded_engine = None
+                return
+            time.sleep(2)
+        raise RuntimeError(f"VC engine ({engine}) did not become reachable in time")
 
-    def _load_targets(self, backend, study_id: int):
-        targets = backend.list_targets(study_id)
-        for i, t in enumerate(targets):
+    def _load_targets(self, backend, targets):
+        for t in targets:
             wav_path = t["wav_path"]
             if not os.path.exists(wav_path):
                 raise RuntimeError(f"Target WAV missing: {wav_path}")
             with open(wav_path, "rb") as f:
-                resp = requests.post(
-                    f"https://{VC_HOST}:{VC_PORT}/api/meanvc/load-target",
-                    files={"wav": (os.path.basename(wav_path), f, "audio/wav")},
-                    verify=False, timeout=120)
+                resp = requests.post(f"https://{VC_HOST}:{VC_PORT}/api/meanvc/load-target",
+                                     files={"wav": (os.path.basename(wav_path), f, "audio/wav")},
+                                     verify=False, timeout=120)
             resp.raise_for_status()
             engine_target_id = resp.json().get("target_id")
             if not engine_target_id:
                 raise RuntimeError(f"load-target returned no target_id for {t['ref']}")
             backend.set_engine_target_id(t["id"], engine_target_id)
 
-    # --- the idempotent core ---
-    def ensure_ready(self, backend, study: dict) -> None:
-        """Blocking. Bring the engine up and load targets if needed. Safe to call
-        repeatedly; skips fast when already prepared."""
+    def ensure_engine(self, backend, study_id: int, requested_engine: Optional[str]) -> None:
+        """Blocking. Bring up the engine this scenario needs (restarting :5002 if it
+        differs) and load its targets. A natural-only scenario passes None and
+        reuses whatever engine is up (default if none)."""
         with self._lock:
-            study_id = study["id"]
-            targets = backend.list_targets(study_id)
-            already = self.is_engine_up() and self._loaded and all(t.get("engine_target_id") for t in targets)
+            target_engine = requested_engine or (self._current_engine if self.is_engine_up() else DEFAULT_ENGINE)
+            targets = [t for t in backend.list_targets(study_id) if t["engine"] == target_engine]
+            already = (self.is_engine_up() and self._current_engine == target_engine
+                       and self._loaded_engine == target_engine
+                       and all(t.get("engine_target_id") for t in targets))
             if already:
                 self._set_status("ready")
                 return
 
             self._reset_steps()
             try:
-                s = self._step("Starting voice engine")
-                self._start_engine_and_wait()
-                self._finish_step(s)
+                if not (self.is_engine_up() and self._current_engine == target_engine):
+                    s = self._step(f"Starting {target_engine} voice engine")
+                    self._restart_to(target_engine)
+                    self._finish_step(s)
 
                 s = self._step(f"Loading {len(targets)} target voice(s)")
-                self._load_targets(backend, study_id)
-                self._loaded = True
+                backend.clear_engine_target_ids(study_id, target_engine)
+                self._load_targets(backend, targets)
+                self._loaded_engine = target_engine
                 self._finish_step(s)
 
                 s = self._step("Checking speech model")
@@ -168,21 +175,19 @@ class VCEngineManager:
                 self._finish_step(s)
 
                 self._set_status("ready")
-            except Exception as e:  # noqa: BLE001 - surface any prepare failure to the UI
+            except Exception as e:  # noqa: BLE001
                 self._set_status("error", str(e))
                 raise
 
-    def start_prepare_async(self, backend, study: dict) -> None:
-        """Kick off ensure_ready in the background so the endpoint can return and
-        the client can stream progress. No-op if a prepare is already running."""
+    def start_prepare_async(self, backend, study_id: int, requested_engine: Optional[str]) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._set_status("preparing")
 
         def _run():
             try:
-                self.ensure_ready(backend, study)
-            except Exception:  # noqa: BLE001 - state already carries the error
+                self.ensure_engine(backend, study_id, requested_engine)
+            except Exception:  # noqa: BLE001
                 pass
 
         self._thread = threading.Thread(target=_run, daemon=True)
