@@ -24,7 +24,9 @@ dependencies = [
     "pyphen",
     "audiobox-aesthetics",
     "librosa==0.10.2",
-    "transformers",
+    # Pinned to torch-2.4-compatible transformers: newer releases import DTensor
+    # from torch.distributed.tensor (needs torch>=2.5), crashing the metrics path.
+    "transformers==4.44.1",
     "sentence-transformers==3.3.1",
     "matplotlib",
     "soundfile==0.12.1",
