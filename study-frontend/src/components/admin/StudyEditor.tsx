@@ -90,8 +90,7 @@ export function StudyEditor({ token, studyId, onBack }: {
 }
 
 function TargetsPanel({ token, studyId, targets, engines, onChange }: any) {
-  const [ref, setRef] = useState("")
-  const [speaker, setSpeaker] = useState("")
+  const [speakerId, setSpeakerId] = useState("")
   const [engine, setEngine] = useState(engines[0] || "meanvc")
   const [file, setFile] = useState<File | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -99,34 +98,39 @@ function TargetsPanel({ token, studyId, targets, engines, onChange }: any) {
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-end gap-2 rounded-lg border p-3">
-        <Labeled label="Ref"><Input value={ref} onChange={e => setRef(e.target.value)} placeholder="vc1" className="w-24" /></Labeled>
-        <Labeled label="Speaker ID"><Input value={speaker} onChange={e => setSpeaker(e.target.value)} placeholder="p225" className="w-28" /></Labeled>
+      <div className="mb-2 flex flex-wrap items-end gap-2 rounded-lg border p-3">
+        <Labeled label="Speaker ID"><Input value={speakerId} onChange={e => setSpeakerId(e.target.value)} placeholder="e.g. p225" className="w-36" /></Labeled>
         <Labeled label="Engine">
           <select className="rounded-md border bg-background px-2 py-2 text-sm" value={engine} onChange={e => setEngine(e.target.value)}>
             {engines.map((en: string) => <option key={en} value={en}>{en}</option>)}
           </select>
         </Labeled>
         <input type="file" accept="audio/*" onChange={e => setFile(e.target.files?.[0] || null)} className="text-sm" />
-        <Button size="sm" disabled={busy || !ref || !file} onClick={async () => {
+        <Button size="sm" disabled={busy || !speakerId.trim() || !file} onClick={async () => {
           if (!file) return
+          const id = speakerId.trim()
           setBusy(true); setErr(null)
-          try { await adminApi.uploadTarget(token, studyId, ref, speaker || ref, file.name, engine, file); setRef(""); setSpeaker(""); setFile(null); onChange() }
+          // One identifier names the voice: used as the link key, the display name,
+          // and the target_speaker_id saved with each session.
+          try { await adminApi.uploadTarget(token, studyId, id, id, id, engine, file); setSpeakerId(""); setFile(null); onChange() }
           catch (e: any) { setErr(e?.message || String(e)) } finally { setBusy(false) }
-        }}>Upload</Button>
+        }}>Upload voice</Button>
         {err && <span className="text-xs text-destructive">{err}</span>}
       </div>
+      <p className="mb-4 text-xs text-muted-foreground">
+        The Speaker ID names this voice — it appears in the scenario voice selectors and is saved with
+        every session as <code>target_speaker_id</code>.
+      </p>
       <ul className="space-y-1 text-sm">
         {targets.map((t: any) => (
           <li key={t.id} className="flex items-center gap-2">
-            <Badge variant="secondary">{t.ref}</Badge>
+            <Badge variant="secondary">{t.speaker_id}</Badge>
             <Badge>{t.engine}</Badge>
-            <span>{t.label}</span>
-            <span className="text-xs text-muted-foreground">{t.speaker_id}</span>
+            <span className="text-xs text-muted-foreground">{t.wav_path?.split("/").pop()}</span>
             <Button size="sm" variant="ghost" className="ml-auto" onClick={async () => { await adminApi.deleteTarget(token, studyId, t.id); onChange() }}>Delete</Button>
           </li>
         ))}
-        {targets.length === 0 && <li className="text-sm text-muted-foreground">No targets uploaded.</li>}
+        {targets.length === 0 && <li className="text-sm text-muted-foreground">No voices uploaded.</li>}
       </ul>
     </div>
   )

@@ -128,8 +128,8 @@ export function ScenarioEditor({ token, studyId, scenario, index, voices, engine
                 <Field label="Target voice">
                   <Select value={target} onChange={setTarget}
                     options={engineTargets.map((t: any) => t.ref)}
-                    labels={Object.fromEntries(engineTargets.map((t: any) => [t.ref, `${t.ref} (${t.speaker_id})`]))}
-                    placeholder="Select target" />
+                    labels={Object.fromEntries(engineTargets.map((t: any) => [t.ref, t.speaker_id]))}
+                    placeholder="Select voice" />
                 </Field>
               )}
               {needsSwitch && (
