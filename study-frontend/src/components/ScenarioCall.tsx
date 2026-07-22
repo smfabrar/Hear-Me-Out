@@ -96,6 +96,7 @@ export function ScenarioCall({ code, scenario, onDone }: {
         <Field label="Task goal" value={scenario.task_goal} />
         <Field label="Relevant facts" value={scenario.relevant_facts} />
         <Field label="Success criteria" value={scenario.success_criteria} />
+        {(scenario.extra_fields || []).map((f, i) => <Field key={i} label={f.label} value={f.value} />)}
       </div>
 
       <div className="flex flex-col gap-4 rounded-xl border bg-card p-5">

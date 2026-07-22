@@ -91,6 +91,7 @@ def _scenario_card(scenario: dict, scenario_order: int) -> dict:
         "task_goal": card.get("task_goal", ""),
         "relevant_facts": card.get("relevant_facts", ""),
         "success_criteria": card.get("success_criteria", ""),
+        "extra_fields": [f for f in (card.get("extra_fields") or []) if f.get("label")],
         "time_limit_s": scenario.get("time_limit_s", 300),
     }
 

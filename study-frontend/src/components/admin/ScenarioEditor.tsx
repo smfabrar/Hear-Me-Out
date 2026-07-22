@@ -41,6 +41,7 @@ export function ScenarioEditor({ token, studyId, scenario, index, voices, engine
   const [facts, setFacts] = useState(card.relevant_facts || "")
   const [success, setSuccess] = useState(card.success_criteria || "")
   const [prompt, setPrompt] = useState(scenario.system_prompt || "")
+  const [extraFields, setExtraFields] = useState<{ label: string; value: string }[]>(card.extra_fields || [])
   const [voicePrompt, setVoicePrompt] = useState(scenario.voice_prompt || voices[0] || "NATF2.pt")
   const [timeLimit, setTimeLimit] = useState(scenario.time_limit_s || 300)
   const [preset, setPreset] = useState<Preset>(init.preset)
@@ -60,7 +61,10 @@ export function ScenarioEditor({ token, studyId, scenario, index, voices, engine
     try {
       await adminApi.updateScenario(token, studyId, scenario.id, {
         order_idx: scenario.order_idx ?? index, title,
-        scenario_card: { role, task_goal: goal, relevant_facts: facts, success_criteria: success },
+        scenario_card: {
+          role, task_goal: goal, relevant_facts: facts, success_criteria: success,
+          extra_fields: extraFields.filter(f => f.label.trim()),
+        },
         system_prompt: prompt, voice_prompt: voicePrompt, time_limit_s: Number(timeLimit),
         voice_schedule: scheduleFromPreset(preset, engine, target, Number(switchS)),
       })
@@ -82,6 +86,23 @@ export function ScenarioEditor({ token, studyId, scenario, index, voices, engine
           <Field label="Relevant facts"><Textarea value={facts} onChange={setFacts} /></Field>
           <Field label="Success criteria"><Textarea value={success} onChange={setSuccess} /></Field>
           <Field label="System prompt (hidden from participant)"><Textarea value={prompt} onChange={setPrompt} /></Field>
+
+          <div className="rounded-md border p-3">
+            <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground">Extra fields (shown on the scenario card)</div>
+            <div className="flex flex-col gap-2">
+              {extraFields.map((f, i) => (
+                <div key={i} className="flex gap-2">
+                  <Input className="w-40" placeholder="Label" value={f.label}
+                    onChange={e => setExtraFields(a => a.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} />
+                  <Input className="flex-1" placeholder="Value" value={f.value}
+                    onChange={e => setExtraFields(a => a.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
+                  <Button size="sm" variant="ghost" onClick={() => setExtraFields(a => a.filter((_, j) => j !== i))}>✕</Button>
+                </div>
+              ))}
+              <Button size="sm" variant="secondary" className="self-start"
+                onClick={() => setExtraFields(a => [...a, { label: "", value: "" }])}>+ Add field</Button>
+            </div>
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <Field label="Assistant voice">

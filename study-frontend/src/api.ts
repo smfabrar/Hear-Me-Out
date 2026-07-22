@@ -48,6 +48,7 @@ export interface ScenarioInfo {
   task_goal: string;
   relevant_facts: string;
   success_criteria: string;
+  extra_fields?: { label: string; value: string }[];
   time_limit_s: number;
 }
 export interface RunState {

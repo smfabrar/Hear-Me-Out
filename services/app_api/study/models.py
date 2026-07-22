@@ -40,11 +40,21 @@ class Questionnaires(BaseModel):
         extra = "allow"
 
 
+class ExtraField(BaseModel):
+    label: str = ""
+    value: str = ""
+
+    class Config:
+        extra = "allow"
+
+
 class ScenarioCard(BaseModel):
     role: str = ""
     task_goal: str = ""
     relevant_facts: str = ""
     success_criteria: str = ""
+    # Researcher-defined additional labeled fields shown on the scenario card.
+    extra_fields: list[ExtraField] = Field(default_factory=list)
 
     class Config:
         extra = "allow"
