@@ -1,11 +1,11 @@
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Spinner } from "@/components/ui/spinner"
-import { Switch } from "@/components/ui/switch"
+import { Button } from "@shared/ui/button"
+import { Badge } from "@shared/ui/badge"
+import { Spinner } from "@shared/ui/spinner"
+import { Switch } from "@shared/ui/switch"
 import { Mic, MicOff, ChevronRight, Wand2, Volume2, Pause, Headphones } from "lucide-react"
 import { useRef, useState } from "react"
-import { cn } from "@/lib/utils"
-import type { useMeanVCPipeline } from "@/hooks/useMeanVCPipeline"
+import { cn } from "@shared/lib/utils"
+import type { useMeanVCPipeline } from "@shared/hooks/useMeanVCPipeline"
 
 type VCState = ReturnType<typeof useMeanVCPipeline>
 
