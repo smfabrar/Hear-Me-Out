@@ -1,8 +1,8 @@
 import { useState, useRef } from "react"
-import { Button } from "@/components/ui/button"
-import { Spinner } from "@/components/ui/spinner"
+import { Button } from "@shared/ui/button"
+import { Spinner } from "@shared/ui/spinner"
 import { Download, Play, Pause, BarChart3 } from "lucide-react"
-import { formatTime } from "@/lib/utils"
+import { formatTime } from "@shared/lib/utils"
 
 interface Props {
   userWavUrl: string | null
