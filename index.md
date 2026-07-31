@@ -18,7 +18,30 @@ description: "Interactive evaluation and bias discovery platform for speech-to-s
     <img src="{{ '/assets/KTH_Logo.jpg' | relative_url }}" alt="KTH Royal Institute of Technology" style="height: 40px; width: auto;">
     <p style="color: #666; margin: 0; font-style: italic;">KTH Royal Institute of Technology, Stockholm, Sweden</p>
   </div>
-  
+
+  <!-- Study-platform contributors. Order is randomized on every visit (Fisher–Yates) and
+       faded in only after shuffling, so neither name ever precedes the other. Be happy. -->
+  <div class="platform-contributors" style="margin: 1.25rem 0;">
+    <p style="color:#777; font-size:0.8rem; letter-spacing:0.12em; text-transform:uppercase; margin:0 0 0.35rem;">Study-platform contributors</p>
+    <p id="contrib-names" style="color:#333; font-size:1.15rem; font-weight:700; margin:0; opacity:0; transition:opacity 0.7s ease;">&nbsp;</p>
+    <p style="color:#999; font-size:0.75rem; font-style:italic; margin:0.3rem 0 0;">★ equal contribution — order reshuffled on every visit</p>
+  </div>
+  <script>
+    (function () {
+      var names = ["Syed Mohammad Fahim Abrar", "Felix Ölander"];
+      // Fisher–Yates: neither name is privileged with a fixed position.
+      for (var i = names.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var tmp = names[i]; names[i] = names[j]; names[j] = tmp;
+      }
+      var el = document.getElementById("contrib-names");
+      if (el) {
+        el.innerHTML = names[0] + "&nbsp;&nbsp;·&nbsp;&nbsp;" + names[1];
+        requestAnimationFrame(function () { el.style.opacity = "1"; });
+      }
+    })();
+  </script>
+
   <p><strong><a href="https://testing-moshi--hearmeout-web-dev.modal.run/" target="_blank">🎙️ Click here to try Hear Me Out Live (Under construction for now! Reach out for a preview!)</a></strong></p>
 </div>
 
@@ -32,54 +55,51 @@ description: "Interactive evaluation and bias discovery platform for speech-to-s
 
 ---
 
-## 💻 **Developing with Moshi using Modal for GPU hosting**
+## 🏗️ **Architecture**
 
-### 1. Clone the Repository
+The backend is three services, set up and run entirely from this repo, behind self-signed SSL (browser mic capture requires HTTPS) and launched by `infra/run_all.sh`:
 
-First, you'll need to get a copy of this project on your local machine. Open a terminal and run:
+| Service | Port | Device | Role |
+|---|---|---|---|
+| **PersonaPlex** | 8000 | GPU | Audio-native speech↔speech LM (NVIDIA `personaplex` moshi fork) — ingests audio via the Mimi codec and responds in token space, no separate ASR. |
+| **app-api** | 5001 | GPU | FastAPI app — serves the built frontend + REST: transcription (faster-whisper), offline voice conversion (Seed-VC), and metrics comparison. |
+| **MeanVC** *or* **X-VC** | 5002 | CPU / GPU | Real-time streaming voice conversion + the chat-proxy that converts mic audio and forwards it to PersonaPlex. Engine chosen at launch via `VC_ENGINE` (MeanVC = CPU, X-VC = GPU). |
+
+Each backend is an independent **uv** project under `services/<name>/` with its own venv, so X-VC's torch 2.5 / py3.10 never clashes with the others' torch 2.4.
+
+## ⚙️ **Setup**
+
+`infra/setup.sh` is self-bootstrapping and interactive: it installs **uv**, clones the repo (with the `seed-vc` submodule) + MeanVC, `uv sync`s each service into its own venv, downloads all models, generates SSL, and wires up the workspace.
 
 ```bash
-git clone https://github.com/shreeharsha-bs/Hear-Me-Out.git
-cd Hear-Me-Out
+export HF_TOKEN=hf_xxxxx   # access to gated nvidia/personaplex-7b-v1
+curl -fsSL https://raw.githubusercontent.com/shreeharsha-bs/Hear-Me-Out/main/infra/setup.sh -o setup.sh
+bash setup.sh              # prompts for workspace, repo, token, etc.
 ```
 
-### 2. Set Up Your Development Environment
+- **Workspace** defaults to the current directory — `cd` into your target folder first, or set `WORKSPACE=/path`.
+- **Non-interactive** (CI): pass `-y` with preset env, e.g. `HF_TOKEN=… WORKSPACE=/workspace bash setup.sh -y`.
+- **X-VC engine** (optional, GPU): pass `--xvc` to also install it into its own venv; select it at run time with `VC_ENGINE=xvc`.
 
-### Requirements
+## ▶️ **Running**
 
-- `modal` installed in your current Python virtual environment (`pip install modal`)
-- A Modal account (`modal setup`)
-- A Modal token set up in your environment (`modal token new`)
+```bash
+cd <workspace> && bash Hear-Me-Out/infra/run_all.sh
+# PersonaPlex :8000   app-api :5001   MeanVC :5002   (all SSL)
+```
 
-### Setting up Voice Conversion (seed-VC)
+Set `VC_ENGINE=meanvc|xvc` to pick the voice-conversion engine on `:5002`. `run_all.sh` always serves the Vite build (`frontend/dist`, auto-built if missing).
 
-The voice conversion functionality uses the seed-VC library. To set this up:
+## 🚀 **Deploying a change**
 
-1. Install the required dependencies for the local voice conversion server:
+Edit locally, commit, push — then on the server:
 
-   ```bash
-   pip install -r local_server_requirements.txt
-   ```
-
-2. Start the local voice conversion server in one terminal:
-
-   ```bash
-   python local_vc_server.py
-   ```
-
-3. In another terminal, start the Modal development server:
-
-   ```bash
-   modal serve -m src.app
-   ```
-
-This workflow allows the application to use local voice conversion capabilities (which run on your machine) while serving the main application through Modal.
-
-While the `modal serve` process is running, changes to any of the project files will be automatically applied. Ctrl+C will stop the app.
-
-Note that for frontend changes, the browser cache may need to be cleared. Or better yet, use incognito mode for every run.
-
-If you want to deploy the app look at the instructions on Modal. You also get 30$ of free credits from them for now. You can deploy completely locally but that would require some changes to the code.
+```bash
+cd <workspace>/Hear-Me-Out && git pull
+bash infra/build-frontend.sh                 # only if the frontend changed
+( cd services/<name> && uv sync )            # only if that service's deps changed
+# re-run run_all.sh, or restart the affected service
+```
 
 ---
 
