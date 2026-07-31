@@ -14,8 +14,10 @@ responsive. Progress is reported via a small JSON status file that the API's
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -34,8 +36,14 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-from study.analysis import _session_paths, run_session_analysis, status_path  # noqa: E402
+from study.analysis import (STUDY_DATA_DIR, _session_paths, run_session_analysis,
+                            status_path)  # noqa: E402
+from study.session_scope import analysis_eligible  # noqa: E402
 from study.storage import get_backend  # noqa: E402
+from study.technical_validity import (TECHNICAL_VALIDITY_SCHEMA,
+                                      prepare_technical_validity)  # noqa: E402
+from study.timing_analysis import TIMING_SCHEMA, prepare_timing_analysis  # noqa: E402
+from study.vc_quality_analysis import status_path as vc_quality_status_path  # noqa: E402
 
 # Shared OTel helper (services/ is on sys.path via the insert above). No-op unless
 # OTEL_* is configured; the worker exports to the same collector as app-api.
@@ -61,38 +69,157 @@ def _write(**kw) -> None:
     tmp.replace(p)  # atomic-ish: readers never see a half-written file
 
 
+def _read_vc_quality_status() -> dict:
+    try:
+        return json.loads(vc_quality_status_path().read_text())
+    except (OSError, ValueError):
+        return {"running": True, "done": 0, "total": 0, "current": None}
+
+
+def _run_vc_quality(study_id: int, force: bool) -> str | None:
+    args = [sys.executable, "-m", "study.vc_quality_worker", str(study_id)]
+    if force:
+        args.append("--force")
+    proc = subprocess.Popen(args, cwd=Path(__file__).resolve().parents[1])
+    while proc.poll() is None:
+        status = _read_vc_quality_status()
+        _write(running=True, phase="vc_quality", done=status.get("done", 0),
+               total=status.get("total", 0), current=status.get("current"),
+               study_id=study_id, error=None)
+        time.sleep(2)
+    if proc.returncode:
+        return f"VC-quality worker exited with status {proc.returncode}"
+    return None
+
+
+def _latest_analysis_result(session: dict, key: str) -> dict | None:
+    analysis = (session.get("artifact_manifest") or {}).get("analysis") or {}
+    latest = analysis.get(key) or {}
+    relative_path = latest.get("path") if isinstance(latest, dict) else None
+    if not relative_path:
+        return None
+    try:
+        return json.loads((STUDY_DATA_DIR / relative_path).read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _needs_timing(session: dict) -> bool:
+    result = _latest_analysis_result(session, "timing_latest")
+    return not result or result.get("schema") != TIMING_SCHEMA
+
+
+def _needs_validity(session: dict) -> bool:
+    result = _latest_analysis_result(session, "technical_validity_latest")
+    return (not result or result.get("schema") != TECHNICAL_VALIDITY_SCHEMA
+            or result.get("status") == "incomplete")
+
+
+def _needs_preprocessing(session: dict) -> bool:
+    transcript = session.get("transcript") or {}
+    return (session.get("metrics") is None
+            or not isinstance(transcript, dict)
+            or "participant_segments" not in transcript)
+
+
+def _analysis_candidates(sessions: list[dict], force: bool) -> list[dict]:
+    return [session for session in sessions
+            if analysis_eligible(session)
+            and session.get("ended_at") is not None
+            and (force or _needs_preprocessing(session) or _needs_timing(session)
+                 or _needs_validity(session))]
+
+
 def main() -> None:
     study_id = int(sys.argv[1])
     force = "--force" in sys.argv[2:]
 
     backend = get_backend()
     sessions = backend.list_sessions(study_id)
-    pending = [s for s in sessions
-               if (s.get("files") or {}).get("participant")
-               and not str(s.get("session_id", "")).endswith("_TEST")  # practice: recorded, not counted
-               and (force or s.get("metrics") is None)]
+    pending = _analysis_candidates(sessions, force)
     total = len(pending)
     done = 0
-    _write(running=True, done=0, total=total, current=None, study_id=study_id)
+    _write(running=True, phase="preprocessing", done=0, total=total,
+           current=None, study_id=study_id, error=None)
 
     for s in pending:
-        _write(running=True, done=done, total=total, current=s["session_id"], study_id=study_id)
+        _write(running=True, phase="preprocessing", done=done, total=total,
+               current=s["session_id"], study_id=study_id, error=None)
         if logging_setup:
             logging_setup.set_log_session(s["session_id"], study_id)
+        files = s.get("files") or {}
         conv, raw, mt = _session_paths(s)
         span_cm = (otel.start_span(_tracer, "analysis.session",
                                    attributes={"study.session_id": s["session_id"],
                                                "study.study_id": study_id})
                    if otel else contextlib.nullcontext())
-        try:
-            with span_cm:
-                run_session_analysis(s["session_id"], conv, raw, mt)
-        except Exception as e:  # noqa: BLE001 - one bad session shouldn't kill the batch
-            print(f"[analysis_worker] error for {s['session_id']}: {e}", file=sys.stderr)
-        done += 1
-        _write(running=True, done=done, total=total, current=None, study_id=study_id)
+        with span_cm:
+            stage_errors: dict[str, str] = {}
+            timing = None
+            analysis_id = (
+                f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}."
+                f"{time.time_ns() % 1_000_000_000:09d}Z"
+            )
+            if files.get("participant") and (force or _needs_preprocessing(s)):
+                try:
+                    run_session_analysis(s["session_id"], conv, raw, mt)
+                except Exception as exc:  # noqa: BLE001
+                    stage_errors["preprocessing"] = str(exc)
+                    print(f"[analysis_worker] preprocessing error for {s['session_id']}: {exc}",
+                          file=sys.stderr)
+            elif not files.get("participant"):
+                stage_errors["preprocessing"] = "participant audio is missing"
 
-    _write(running=False, done=done, total=total, current=None, study_id=study_id)
+            try:
+                if force or _needs_preprocessing(s):
+                    # Refresh after preprocessing because it updates the DB row.
+                    s = backend.get_session(s["session_id"]) or s
+                if force or _needs_timing(s):
+                    timing = prepare_timing_analysis(s, STUDY_DATA_DIR, analysis_id)
+                    latest = backend.get_session(s["session_id"]) or s
+                    manifest = copy.deepcopy(latest.get("artifact_manifest") or {})
+                    manifest.setdefault("analysis", {})["timing_latest"] = timing[
+                        "result_artifact"]
+                    backend.update_session_artifacts(s["session_id"], manifest)
+                    s = backend.get_session(s["session_id"]) or latest
+                else:
+                    timing = _latest_analysis_result(s, "timing_latest")
+            except Exception as exc:  # noqa: BLE001
+                stage_errors["timing"] = str(exc)
+                print(f"[analysis_worker] timing error for {s['session_id']}: {exc}",
+                      file=sys.stderr)
+
+            try:
+                validity = prepare_technical_validity(
+                    backend.get_session(s["session_id"]) or s,
+                    STUDY_DATA_DIR, analysis_id, timing, stage_errors,
+                )
+                latest = backend.get_session(s["session_id"]) or s
+                manifest = copy.deepcopy(latest.get("artifact_manifest") or {})
+                analysis = manifest.setdefault("analysis", {})
+                analysis["technical_validity_latest"] = validity["result_artifact"]
+                analysis["technical_validity_summary"] = {
+                    key: validity[key] for key in (
+                        "schema", "evaluated_at", "status",
+                        "valid_for_condition_analysis",
+                        "valid_for_timing_reconstruction",
+                        "valid_for_confirmatory_timing_analysis",
+                        "speech_boundary_validation_status", "failures", "warnings",
+                    )
+                }
+                backend.update_session_artifacts(s["session_id"], manifest)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[analysis_worker] technical-validity error for {s['session_id']}: {exc}",
+                      file=sys.stderr)
+        done += 1
+        _write(running=True, phase="preprocessing", done=done, total=total,
+               current=None, study_id=study_id, error=None)
+
+    error = _run_vc_quality(study_id, force)
+    final_status = _read_vc_quality_status()
+    _write(running=False, phase="complete" if error is None else "failed",
+           done=final_status.get("done", 0), total=final_status.get("total", 0),
+           current=None, study_id=study_id, error=error)
 
 
 if __name__ == "__main__":

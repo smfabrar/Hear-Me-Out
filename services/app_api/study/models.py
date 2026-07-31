@@ -12,7 +12,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 FieldType = Literal["text", "textarea", "number", "radio", "select", "checkbox",
-                    "switch", "scale", "audio_playback"]
+                    "switch", "scale", "audio_playback", "notice"]
 
 
 class ShowIf(BaseModel):
@@ -40,15 +40,21 @@ class QuestionnaireItem(BaseModel):
     min_label: Optional[str] = None           # scale endpoints
     max_label: Optional[str] = None
     placeholder: Optional[str] = None
+    max_plays: Optional[int] = None             # audio_playback: permitted playback starts
 
     class Config:
         extra = "allow"
 
 
 class Questionnaires(BaseModel):
+    eligibility: list[QuestionnaireItem] = Field(default_factory=list)
     consent: list[QuestionnaireItem] = Field(default_factory=list)
+    audio_check: list[QuestionnaireItem] = Field(default_factory=list)
     background: list[QuestionnaireItem] = Field(default_factory=list)
     post: list[QuestionnaireItem] = Field(default_factory=list)
+    pre_playback: list[QuestionnaireItem] = Field(default_factory=list)
+    playback: list[QuestionnaireItem] = Field(default_factory=list)
+    debrief: list[QuestionnaireItem] = Field(default_factory=list)
     final: list[QuestionnaireItem] = Field(default_factory=list)
 
     class Config:
@@ -110,9 +116,6 @@ class Scenario(BaseModel):
     time_limit_s: int = 300
     # Scenario-specific post-questionnaire items (appended after the shared post items).
     post_items: list[QuestionnaireItem] = Field(default_factory=list)
-    # Practice scenario: always runs first, shown to the participant as practice, still
-    # recorded but flagged so it doesn't count toward the study. At most one per study.
-    is_test: bool = False
 
     class Config:
         extra = "allow"
@@ -161,7 +164,8 @@ class SessionStartRequest(BaseModel):
 
 class QuestionnaireRequest(BaseModel):
     code: str
-    kind: Literal["consent", "background", "post", "final"]
+    kind: Literal["eligibility", "consent", "audio_check", "background", "practice_post",
+                  "post", "pre_playback", "playback", "debrief", "final"]
     payload: dict[str, Any] = Field(default_factory=dict)
     session_id: Optional[str] = None
 
@@ -185,6 +189,7 @@ def default_questionnaires() -> dict:
         QuestionnaireItem(id="consent_logs", type="switch",
                           label="I consent to transcripts and interaction logs being saved.", required=True),
     ]
+    audio_check: list[QuestionnaireItem] = []
     background = [
         QuestionnaireItem(id="age", type="number", label="Age", min=0, max=120),
         QuestionnaireItem(id="native_language", type="text", label="Native language"),
@@ -207,4 +212,5 @@ def default_questionnaires() -> dict:
                           label="Did you notice differences between the voices? Describe."),
         QuestionnaireItem(id="overall_comments", type="textarea", label="Overall comments"),
     ]
-    return Questionnaires(consent=consent, background=background, post=post, final=final).model_dump()
+    return Questionnaires(consent=consent, audio_check=audio_check, background=background,
+                          post=post, final=final).model_dump()

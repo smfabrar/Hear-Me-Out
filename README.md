@@ -12,6 +12,7 @@ Try it live: https://testing-moshi--hearmeout-web-dev.modal.run/
 - [Architecture](#architecture)
 - [Setup](#setup)
 - [Running](#running)
+- [Study platform](#study-platform)
 - [Configuration](#configuration)
 - [Deploying a change](#deploying-a-change)
 
@@ -66,6 +67,39 @@ cd <workspace> && bash Hear-Me-Out/infra/run_all.sh
 
 `run_all.sh` auto-detects the workspace from its own location; override with `WORKSPACE=…`. It always serves the Vite build (`frontend/dist`, auto-built if missing). Set `VC_ENGINE=meanvc|xvc` to pick the voice-conversion engine on `:5002` (`xvc` requires the X-VC install from setup).
 
+## Study platform
+
+The same backend doubles as a **participant-study platform** for controlled voice-conditioning
+experiments. Set `APP_MODE=study` and `:5001` serves the study app (participant experiment +
+token-gated admin) instead of the HMO Chat/Convert/Metrics UI — the two are mutually exclusive.
+
+```bash
+APP_MODE=study bash infra/build-frontend.sh    # builds study-frontend/
+APP_MODE=study bash infra/run_all.sh           # or pick "2) Study platform" at the prompt
+```
+
+- **Admin** (token-gated) manages many studies: scenarios with **timed voice schedules** (natural /
+  VC, with mid-call switch points), engine-tagged **target voices**, and questionnaires. It
+  generates participants with **counterbalanced, gender-conditional** condition assignment, and runs
+  post-hoc **analysis** and **export**. Studies are authored in the UI or imported from YAML
+  (`services/app_api/study/templates/`).
+- **Participant flow** — resumable and time-limited (1 hour): eligibility → consent → audio check →
+  background → a **practice** scenario → the counterbalanced analytical scenarios (each followed by a
+  short questionnaire) → final questionnaire → converted-voice playback → debrief. The system prompt
+  and voice schedule **never reach the browser** — the VC engine resolves them server-side via
+  `GET /condition/{session_id}`, and the right engine is prepared on demand (restarting `:5002` when
+  a scenario needs a different one).
+- **Voice conditions** per scenario: `stable_natural`, `stable_converted`, `vc_activation`
+  (natural → converted mid-call), and `vc_deactivation` (converted → natural).
+- **Analysis** produces, per session: **technical-validity** checks (capture drops, routing/schedule
+  adherence, playback underruns), a **timing** timeline with millisecond diarization
+  (participant/assistant intervals, overlaps, barge-ins), speech/**preprocessing** metrics, and
+  objective **VC-quality** (WER, speaker similarity, UTMOS). `GET …/export` bundles every session's
+  audio + artifacts with a `study_export.json`. See [docs/study-data-pipeline.md](docs/study-data-pipeline.md).
+
+A **Soundboard** and a **VC-quality** service support reproducible stimulus delivery and post-hoc
+voice-quality scoring — see [SOUNDBOARD.md](SOUNDBOARD.md).
+
 ## Configuration
 
 `services/app_api/app.py` and `services/meanvc/server.py` are fully env-driven; `run_all.sh` derives these from `WORKSPACE` (`<ws>`):
@@ -81,7 +115,38 @@ cd <workspace> && bash Hear-Me-Out/infra/run_all.sh
 | `SSL_DIR` | `<ws>/ssl` | all (TLS) |
 | `PERSONAPLEX_PROXY_HOST` / `PERSONAPLEX_PROXY_PORT` | `127.0.0.1` / `8000` | MeanVC chat-proxy → PersonaPlex |
 
-When `VC_ENGINE=xvc`, `run_all.sh` instead sets `XVC_DIR`, `XVC_CONFIG`, `XVC_CKPT`, and the streaming window `XVC_CHUNK_MS` / `XVC_CURRENT_MS` / `XVC_SMOOTH_MS` / `XVC_FUTURE_MS` (default `2400/120/20/100` ms), and runs `services/xvc/server.py` via the `services/xvc` uv env.
+When `VC_ENGINE=xvc`, `run_all.sh` instead sets `XVC_DIR`, `XVC_CONFIG`, `XVC_CKPT`, and the streaming window `XVC_CHUNK_MS` / `XVC_CURRENT_MS` / `XVC_SMOOTH_MS` / `XVC_FUTURE_MS` (default `2400/120/20/100` ms), and runs `services/xvc/server.py` via the `services/xvc` uv env. Quiet XVC windows bypass GPU inference by default (`XVC_SILENCE_GATE_RMS=0.008`, `XVC_SILENCE_HANGOVER_MS=360`) while transmitting the same number of silent samples; set the threshold to `0` to disable this gate.
+
+Frontend post-VC voice analysis is controlled independently from PersonaPlex
+session reset:
+
+| Mode | Effect |
+|---|---|
+| `off` | Do not show or run post-VC voice metrics automatically. |
+| `manual` | Show analysis buttons after results are saved; do not auto-run them. This is the default. |
+| `after_vc` | Legacy auto-run of voice-change metrics after a VC run; VC-quality remains available manually. |
+
+Set the mode at build/runtime with Vite env, or per browser session with a query
+parameter:
+
+```bash
+# Default/recommended: fresh sessions, saved results, manual analysis buttons
+VITE_VOICE_ANALYSIS_MODE=manual npm run build
+
+# No post-VC analysis UI or background analysis
+VITE_VOICE_ANALYSIS_MODE=off npm run build
+
+# Backward-compatible legacy auto voice-change metrics after VC
+VITE_VOICE_ANALYSIS_MODE=after_vc npm run build
+```
+
+Per session:
+
+```text
+https://<host>/?voice_analysis=off
+https://<host>/?voice_analysis=manual
+https://<host>/?voice_analysis=after_vc
+```
 
 ## Deploying a change
 
@@ -97,4 +162,3 @@ bash infra/build-frontend.sh                 # only if the frontend changed
 A frontend-only change needs a rebuild + hard refresh, no backend restart. A backend change
 (`services/app_api/app.py`, `services/meanvc/server.py`, `services/xvc/server.py`,
 `services/app_api/metrics.py`) needs the service restarted.
-
