@@ -10,11 +10,26 @@ import { AudioCheck } from "@/components/AudioCheck"
 
 type Phase =
   | "code" | "welcome"
-  | "consent" | "audiocheck" | "background" | "practice"
-  | "scenario" | "post" | "final" | "completion"
+  | "eligibility" | "ineligible" | "consent" | "declined" | "background" | "audio_check"
+  | "practice_intro" | "main_intro" | "scenario" | "post"
+  | "pre_playback" | "playback" | "debrief" | "final" | "completion"
 
-function sessionIdFor(pid: string, order: number) {
-  return `${pid}_S${String(order).padStart(2, "0")}`
+function mergePostItems(shared: QItem[], scenarioItems: QItem[]): QItem[] {
+  const merged = [...shared]
+  for (const item of scenarioItems) {
+    const anchor = item.insert_after
+    const index = anchor ? merged.findIndex(candidate => candidate.id === anchor) : -1
+    if (index < 0) merged.push(item)
+    else merged.splice(index + 1, 0, item)
+  }
+  return merged
+}
+
+function clearPlaybackCounts() {
+  for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+    const key = sessionStorage.key(index)
+    if (key?.startsWith("hmo:playback-count:")) sessionStorage.removeItem(key)
+  }
 }
 
 export function ParticipantFlow() {
@@ -22,6 +37,7 @@ export function ParticipantFlow() {
   const [data, setData] = useState<EnterResult | null>(null)
   const [phase, setPhase] = useState<Phase>("code")
   const [scenarioIdx, setScenarioIdx] = useState(0)
+  const [postSessionId, setPostSessionId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [deadline, setDeadline] = useState<number | null>(null)
@@ -78,17 +94,26 @@ export function ParticipantFlow() {
     const step = run.current_step || {}
     const p = step.phase as Phase | undefined
     if (p === "background") { setPhase("background"); return }
+    if (p === "audio_check") { setPhase("audio_check"); return }
+    if (p === "practice_intro") { setScenarioIdx(0); setPhase("practice_intro"); return }
+    if (p === "main_intro") {
+      setScenarioIdx(Math.max(1, (step.scenario_order ?? 2) - 1))
+      setPhase("main_intro")
+      return
+    }
     if (p === "consent") { setPhase("consent"); return }
-    if (p === "audiocheck") { setPhase("audiocheck"); return }
+    if (p === "eligibility") { setPhase("eligibility"); return }
     if (p === "scenario" || p === "post") {
       setScenarioIdx(Math.max(0, (step.scenario_order ?? 1) - 1))
+      setPostSessionId(typeof step.session_id === "string" ? step.session_id : null)
       setPhase(p)
       return
     }
     if (p === "final") { setPhase("final"); return }
+    if (p === "pre_playback" || p === "playback" || p === "debrief") { setPhase(p); return }
     setScenarioIdx(0)
-    setPhase("consent")
-  }, [])
+    setPhase(q("eligibility").length ? "eligibility" : "consent")
+  }, [data]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const setStep = useCallback((current_step: Record<string, any>, completed: Record<string, any> = {}) => {
     if (code) api.progress(code, current_step, completed).catch(() => {})
@@ -102,27 +127,29 @@ export function ParticipantFlow() {
       const secs = res?.run?.remaining_seconds ?? 3600
       setDeadline(Date.now() + secs * 1000)
       if (mode === "restart") {
-        setScenarioIdx(0); setStep({ phase: "consent" }); setPhase("consent")
+        clearPlaybackCounts()
+        const first = q("eligibility").length ? "eligibility" : "consent"
+        setScenarioIdx(0); setPostSessionId(null); setStep({ phase: first }); setPhase(first)
       } else {
         goToRunStep(res.run)
       }
     } catch (e: any) {
       setError(e?.message || "Could not start")
     } finally { setBusy(false) }
-  }, [code, goToRunStep, setStep])
+  }, [code, data, goToRunStep, setStep]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- render ----------
   if (phase === "code") {
     return (
       <Centered>
         <h1 className="text-2xl font-bold">Welcome</h1>
-        <p className="text-sm text-muted-foreground">Enter your participant code to begin.</p>
+        <p className="text-base text-muted-foreground">Enter your participant code to begin.</p>
         <div className="flex w-full max-w-xs gap-2">
           <Input value={code} onChange={e => setCode(e.target.value.toUpperCase())}
-                 placeholder="e.g. A7X9K2" onKeyDown={e => e.key === "Enter" && doEnter(code)} />
-          <Button onClick={() => doEnter(code)} disabled={busy || !code}>{busy ? "…" : "Start"}</Button>
+                 className="text-base" placeholder="e.g. A7X9K2" onKeyDown={e => e.key === "Enter" && doEnter(code)} />
+          <Button className="text-base" onClick={() => doEnter(code)} disabled={busy || !code}>{busy ? "…" : "Start"}</Button>
         </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {error && <p className="text-base text-destructive">{error}</p>}
       </Centered>
     )
   }
@@ -132,14 +159,13 @@ export function ParticipantFlow() {
     return (
       <Centered>
         <h1 className="text-2xl font-bold">{data.study_name}</h1>
-        <p className="text-sm text-muted-foreground">Participant {data.participant_id}</p>
         {st === "submitted" ? (
           <>
-            <p className="text-sm">You have already completed this study. Thank you!</p>
+            <p className="text-base">You have already completed this study. Thank you!</p>
           </>
         ) : st === "in_progress" || st === "expired" ? (
           <>
-            <p className="max-w-md text-center text-sm text-muted-foreground">
+            <p className="max-w-md text-center text-base leading-7 text-muted-foreground">
               {st === "expired"
                 ? "Your previous session expired. You can continue where you left off (your completed scenarios are kept) or restart."
                 : "You have a session in progress. Continue where you left off, or restart."}
@@ -152,16 +178,16 @@ export function ParticipantFlow() {
         ) : (
           <>
             {data.welcome_text
-              ? <div className="max-h-[60vh] max-w-2xl overflow-auto whitespace-pre-wrap text-left text-sm">{data.welcome_text}</div>
-              : <p className="max-w-md text-center text-sm text-muted-foreground">
+              ? <div className="max-h-[60vh] max-w-2xl overflow-auto whitespace-pre-wrap text-left text-base leading-7">{data.welcome_text}</div>
+              : <p className="max-w-md text-center text-base leading-7 text-muted-foreground">
                   You will complete {data.scenarios.length} conversation scenarios, each followed by a brief
                   questionnaire. You have one hour to finish.
                 </p>}
-            {data.estimated_duration && <p className="text-xs text-muted-foreground">Estimated duration: {data.estimated_duration}</p>}
-            <Button onClick={() => startRun("restart")} disabled={busy}>Begin</Button>
+            {data.estimated_duration && <p className="text-sm text-muted-foreground">Estimated duration: {data.estimated_duration}</p>}
+            <Button className="text-base" onClick={() => startRun("restart")} disabled={busy}>Begin</Button>
           </>
         )}
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {error && <p className="text-base text-destructive">{error}</p>}
       </Centered>
     )
   }
@@ -173,28 +199,52 @@ export function ParticipantFlow() {
     </div>
   )
 
-  // Consent FIRST — nothing is recorded/sent to the VC engine until the participant agrees.
-  if (phase === "consent" && data) {
+  if (phase === "eligibility" && data) {
     return Frame(
-      <QuestionnaireForm title="Consent" items={q("consent")} submitLabel="I agree — continue" busy={busy}
+      <QuestionnaireForm title="Eligibility" items={q("eligibility")} busy={busy}
         onSubmit={async (ans) => {
+          if (ans.eligibility_18 !== "Yes") { setPhase("ineligible"); return }
           setBusy(true)
           try {
-            await api.questionnaire(null, code, "consent", ans)
-            setStep({ phase: "audiocheck" })
-            setPhase("audiocheck")
+            await api.questionnaire(null, code, "eligibility", ans)
+            setStep({ phase: "consent" })
+            setPhase("consent")
           } catch (e) { handleErr(e) } finally { setBusy(false) }
         }} />
     )
   }
 
-  if (phase === "audiocheck" && data) {
+  if (phase === "ineligible") {
+    return <Centered><h1 className="text-2xl font-bold">Thank you for your interest</h1><p className="text-base text-muted-foreground">This study is limited to participants aged 18 or older.</p></Centered>
+  }
+
+  if (phase === "declined") {
+    return <Centered><h1 className="text-2xl font-bold">Thank you</h1><p className="text-base text-muted-foreground">You have chosen not to participate. No study interaction will begin.</p></Centered>
+  }
+
+  if (phase === "background" && data) {
     return Frame(
-      <AudioCheck code={code}
-        onDone={async (ans) => {
+      <QuestionnaireForm title="Background questionnaire" items={q("background")} submitLabel="Continue to audio check" busy={busy}
+        onSubmit={async (ans) => {
           setBusy(true)
           try {
-            await api.questionnaire(null, code, "consent", ans)   // { _audio_check: … }
+            await api.questionnaire(null, code, "background", ans)
+            setData(await api.enter(code))
+            setStep({ phase: "audio_check" })
+            setPhase("audio_check")
+          } catch (e) { handleErr(e) } finally { setBusy(false) }
+        }} />
+    )
+  }
+
+  if (phase === "consent" && data) {
+    return Frame(
+      <QuestionnaireForm title="Participant information and consent" items={q("consent")} submitLabel="Continue" busy={busy}
+        onSubmit={async (ans) => {
+          if (ans.consent_decision !== "I consent and wish to continue.") { setPhase("declined"); return }
+          setBusy(true)
+          try {
+            await api.questionnaire(null, code, "consent", ans)
             setStep({ phase: "background" })
             setPhase("background")
           } catch (e) { handleErr(e) } finally { setBusy(false) }
@@ -202,38 +252,57 @@ export function ParticipantFlow() {
     )
   }
 
-  if (phase === "background" && data) {
+  if (phase === "audio_check" && data) {
     return Frame(
-      <QuestionnaireForm title="Background questionnaire" items={q("background")}
-        submitLabel={data.test_scenario ? "Continue to practice" : "Start scenarios"} busy={busy}
-        onSubmit={async (ans) => {
+      <AudioCheck code={code} items={q("audio_check")}
+        onDone={async (ans) => {
           setBusy(true)
           try {
-            await api.questionnaire(null, code, "background", ans)
-            if (data.test_scenario) { setStep({ phase: "practice" }); setPhase("practice") }
-            else { setScenarioIdx(0); setStep({ phase: "scenario", scenario_order: 1 }); setPhase("scenario") }
+            await api.questionnaire(null, code, "audio_check", ans)
+            setScenarioIdx(0)
+            setStep({ phase: "practice_intro" })
+            setPhase("practice_intro")
           } catch (e) { handleErr(e) } finally { setBusy(false) }
         }} />
     )
   }
 
-  // Practice/test scenario — always runs first; shown as practice, still recorded but
-  // flagged (session id ends _TEST) so it doesn't count toward the study.
-  if (phase === "practice" && data && data.test_scenario) {
+  if (phase === "practice_intro" && data) {
     return Frame(
-      <ScenarioCall code={code} scenario={data.test_scenario} isTest onDone={() => {
-        setScenarioIdx(0)
-        setStep({ phase: "scenario", scenario_order: 1 })
-        setPhase("scenario")
-      }} />
+      <TransitionScreen
+        title="Practice interaction"
+        text={data.practice_intro_text ||
+          "You will now complete a short practice conversation to become familiar with the study tasks and controls. The practice recording is retained for technical checks but is not included in the main analysis. Read the scenario carefully, then continue when you are ready."}
+        onContinue={() => {
+          setScenarioIdx(0)
+          setStep({ phase: "scenario", scenario_order: data.scenarios[0].scenario_order })
+          setPhase("scenario")
+        }}
+      />
+    )
+  }
+
+  if (phase === "main_intro" && data) {
+    const scenario = data.scenarios[scenarioIdx]
+    return Frame(
+      <TransitionScreen
+        title="Main study"
+        text={data.main_intro_text ||
+          "The practice interaction is complete. You will now begin the main study conversations. Each conversation presents a different situation and aim. Read each scenario carefully and speak naturally using your own words. Continue when you are ready to begin."}
+        onContinue={() => {
+          setStep({ phase: "scenario", scenario_order: scenario.scenario_order })
+          setPhase("scenario")
+        }}
+      />
     )
   }
 
   if (phase === "scenario" && data) {
     const scenario = data.scenarios[scenarioIdx]
     return Frame(
-      <ScenarioCall code={code} scenario={scenario} onDone={() => {
-        setStep({ phase: "post", scenario_order: scenario.scenario_order })
+      <ScenarioCall code={code} scenario={scenario} onDone={(sessionId) => {
+        setPostSessionId(sessionId)
+        setStep({ phase: "post", scenario_order: scenario.scenario_order, session_id: sessionId })
         setPhase("post")
       }} />
     )
@@ -241,34 +310,91 @@ export function ParticipantFlow() {
 
   if (phase === "post" && data) {
     const scenario = data.scenarios[scenarioIdx]
-    const sid = sessionIdFor(data.participant_id, scenario.scenario_order)
-    const postItems = [...q("post"), ...((scenario.post_items as QItem[]) || [])]
+    const sid = postSessionId
+    const isPractice = scenario.study_role === "practice"
+    const postItems = isPractice
+      ? ((scenario.post_items as QItem[]) || [])
+      : mergePostItems(q("post"), (scenario.post_items as QItem[]) || [])
     return Frame(
-      <QuestionnaireForm title={`After scenario ${scenario.scenario_order}`} items={postItems}
+      <QuestionnaireForm title={isPractice ? "Practice check" : `After scenario ${scenario.scenario_order - 1}`} items={postItems}
         submitLabel={scenarioIdx < data.scenarios.length - 1 ? "Next scenario" : "Final questions"} busy={busy}
         onSubmit={async (ans) => {
           setBusy(true)
           try {
-            await api.questionnaire(sid, code, "post", ans)
+            if (!sid) throw new Error("Could not identify the completed scenario session")
+            await api.questionnaire(sid, code, isPractice ? "practice_post" : "post", ans)
             if (scenarioIdx < data.scenarios.length - 1) {
               const next = scenarioIdx + 1
               setScenarioIdx(next)
-              setStep({ phase: "scenario", scenario_order: data.scenarios[next].scenario_order })
-              setPhase("scenario")
+              setPostSessionId(null)
+              const nextPhase = isPractice ? "main_intro" : "scenario"
+              setStep({ phase: nextPhase, scenario_order: data.scenarios[next].scenario_order })
+              setPhase(nextPhase)
             } else {
-              setStep({ phase: "final" })
-              setPhase("final")
+              const nextPhase = q("pre_playback").length ? "pre_playback" : "final"
+              setStep({ phase: nextPhase })
+              setPhase(nextPhase)
             }
           } catch (e) { handleErr(e) } finally { setBusy(false) }
         }} />
     )
   }
 
+  const analyticalScenarioOptions = data?.scenarios
+    .filter(s => s.study_role !== "practice")
+    .map(s => s.title)
+    .filter(Boolean) || []
+
+  if (phase === "pre_playback" && data) {
+    return Frame(
+      <QuestionnaireForm title="Post-session questionnaire" items={q("pre_playback")}
+        submitLabel="Continue to recording" busy={busy} scenarioOptions={analyticalScenarioOptions}
+        onSubmit={async (ans) => {
+          setBusy(true)
+          try {
+            await api.questionnaire(null, code, "pre_playback", ans)
+            setStep({ phase: "playback" }); setPhase("playback")
+          } catch (e) { handleErr(e) } finally { setBusy(false) }
+        }} />
+    )
+  }
+
+  if (phase === "playback" && data) {
+    return Frame(
+      <QuestionnaireForm title="Recording and voice ratings" items={q("playback")}
+        submitLabel="Continue to debriefing" busy={busy}
+        playbackUrl={(item) => api.playbackUrl(
+          code, item.scenario_order, item.track, item.condition, item.max_duration_s)}
+        onSubmit={async (ans) => {
+          setBusy(true)
+          try {
+            await api.questionnaire(null, code, "playback", ans)
+            setStep({ phase: "debrief" }); setPhase("debrief")
+          } catch (e) { handleErr(e) } finally { setBusy(false) }
+        }} />
+    )
+  }
+
+  if (phase === "debrief" && data) {
+    return Frame(
+      <QuestionnaireForm title="Final comment and debriefing" items={q("debrief")}
+        submitLabel="Submit study" busy={busy}
+        onSubmit={async (ans) => {
+          setBusy(true)
+          try {
+            await api.questionnaire(null, code, "debrief", ans)
+            await api.submit(code)
+            setDeadline(null); setPhase("completion")
+          } catch (e) { handleErr(e) } finally { setBusy(false) }
+        }} />
+    )
+  }
+
   if (phase === "final" && data) {
-    const scenarioOptions = data.scenarios.map(s => s.title).filter(Boolean)
     return Frame(
       <QuestionnaireForm title="Final questionnaire" items={q("final")} submitLabel="Submit study" busy={busy}
-        scenarioOptions={scenarioOptions} playbackUrl={(item) => api.playbackUrl(code, item.scenario_order, item.track)}
+        scenarioOptions={analyticalScenarioOptions} playbackUrl={(item) => api.playbackUrl(
+          code, item.scenario_order, item.track, item.condition, item.max_duration_s)}
         onSubmit={async (ans) => {
           setBusy(true)
           try {
@@ -286,7 +412,7 @@ export function ParticipantFlow() {
       <Centered>
         <CheckCircle2 className="size-12 text-primary" />
         <h1 className="text-2xl font-bold">Thank you!</h1>
-        <p className="text-sm text-muted-foreground">Your responses have been saved. You may close this window.</p>
+        <p className="text-base text-muted-foreground">Your responses have been saved. You may close this window.</p>
       </Centered>
     )
   }
@@ -304,6 +430,22 @@ function Header({ remaining }: { remaining: number | null }) {
         </div>
       )}
     </header>
+  )
+}
+
+function TransitionScreen({ title, text, onContinue }: {
+  title: string
+  text: string
+  onContinue: () => void
+}) {
+  return (
+    <main className="mx-auto max-w-xl py-10 sm:py-16">
+      <h1 className="text-2xl font-semibold">{title}</h1>
+      <div className="mt-4 whitespace-pre-wrap text-base leading-7 text-muted-foreground">
+        {text}
+      </div>
+      <Button className="mt-7 text-base" onClick={onContinue}>Continue</Button>
+    </main>
   )
 }
 

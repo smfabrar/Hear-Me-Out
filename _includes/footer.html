@@ -1,0 +1,52 @@
+<footer class="site-footer h-card">
+  <data class="u-url" href="{{ "/" | relative_url }}"></data>
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">{{ site.title | escape }}</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col footer-col-1">
+        <ul class="contact-list">
+          {%- if site.author -%}
+            <li class="p-name">{{ site.author | escape }}</li>
+          {%- endif -%}
+          <li class="p-name">
+            <span id="footer-contrib">&nbsp;</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="footer-col footer-col-2">
+        <ul class="social-media-list"></ul>
+      </div>
+
+      <div class="footer-col footer-col-3">
+        <p>{{ site.description | escape }}</p>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Study-platform contributors: order alternates on every visit (persisted in
+       localStorage) so neither name is ever consistently first. Fills both the header
+       line (#contrib-names) and this footer line (#footer-contrib) with the same order. -->
+  <script>
+    (function () {
+      var a = "Syed Mohammad Fahim Abrar‡", b = "Felix Ölander‡", first;
+      try {
+        first = (localStorage.getItem("hmo_contrib_first") === a) ? b : a;
+        localStorage.setItem("hmo_contrib_first", first);
+      } catch (e) {
+        first = Math.random() < 0.5 ? a : b;   // private-mode fallback
+      }
+      var second = (first === a) ? b : a;
+      var out = first + "&nbsp;&nbsp;·&nbsp;&nbsp;" + second;
+      ["contrib-names", "footer-contrib"].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) { el.innerHTML = out; el.style.opacity = "1"; }
+      });
+    })();
+  </script>
+
+</footer>
