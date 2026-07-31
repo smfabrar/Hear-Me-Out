@@ -19,25 +19,30 @@ description: "Interactive evaluation and bias discovery platform for speech-to-s
     <p style="color: #666; margin: 0; font-style: italic;">KTH Royal Institute of Technology, Stockholm, Sweden</p>
   </div>
 
-  <!-- Study-platform contributors. Order is randomized on every visit (Fisher–Yates) and
-       faded in only after shuffling, so neither name ever precedes the other. Be happy. -->
+  <!-- Study-platform contributors: two names STACKED, order randomized per visit
+       (Fisher–Yates, faded in after shuffle) so neither is consistently on top. -->
   <div class="platform-contributors" style="margin: 1.25rem 0;">
-    <p style="color:#777; font-size:0.8rem; letter-spacing:0.12em; text-transform:uppercase; margin:0 0 0.35rem;">Study-platform contributors</p>
-    <p id="contrib-names" style="color:#333; font-size:1.15rem; font-weight:700; margin:0; opacity:0; transition:opacity 0.7s ease;">&nbsp;</p>
-    <p style="color:#999; font-size:0.75rem; font-style:italic; margin:0.3rem 0 0;">★ equal contribution — order reshuffled on every visit</p>
+    <p style="color:#777; font-size:0.8rem; letter-spacing:0.12em; text-transform:uppercase; margin:0 0 0.4rem;">Study-platform contributors</p>
+    <div id="contrib-names" style="opacity:0; transition:opacity 0.7s ease;">
+      <p style="color:#333; font-size:1.15rem; font-weight:700; margin:0.1rem 0;">&nbsp;</p>
+      <p style="color:#333; font-size:1.15rem; font-weight:700; margin:0.1rem 0;">&nbsp;</p>
+    </div>
+    <p style="color:#999; font-size:0.75rem; font-style:italic; margin:0.4rem 0 0;">‡ equal contribution</p>
   </div>
   <script>
     (function () {
-      var names = ["Syed Mohammad Fahim Abrar", "Felix Ölander"];
-      // Fisher–Yates: neither name is privileged with a fixed position.
+      var names = ["Syed Mohammad Fahim Abrar‡", "Felix Ölander‡"];
+      // Fisher–Yates: neither name is privileged with a fixed line.
       for (var i = names.length - 1; i > 0; i--) {
         var j = Math.floor(Math.random() * (i + 1));
         var tmp = names[i]; names[i] = names[j]; names[j] = tmp;
       }
-      var el = document.getElementById("contrib-names");
-      if (el) {
-        el.innerHTML = names[0] + "&nbsp;&nbsp;·&nbsp;&nbsp;" + names[1];
-        requestAnimationFrame(function () { el.style.opacity = "1"; });
+      var box = document.getElementById("contrib-names");
+      if (box) {
+        var lines = box.getElementsByTagName("p");
+        lines[0].textContent = names[0];
+        lines[1].textContent = names[1];
+        requestAnimationFrame(function () { box.style.opacity = "1"; });
       }
     })();
   </script>
