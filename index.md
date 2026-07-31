@@ -18,7 +18,6 @@ description: "Interactive evaluation and bias discovery platform for speech-to-s
        which sets this line and the footer to the same order. -->
   <p style="color: #555; font-size: 1rem; margin: 0.25rem 0 0.75rem;">
     <span id="contrib-names" style="opacity:0; transition:opacity 0.6s ease;">&nbsp;</span>
-    <br><span style="color:#999; font-size:0.75rem; font-style:italic;">‡ equal contribution</span>
   </p>
 
   <!-- Affiliation with KTH Logo -->
