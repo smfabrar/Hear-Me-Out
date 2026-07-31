@@ -12,40 +12,20 @@ description: "Interactive evaluation and bias discovery platform for speech-to-s
   <p style="color: #555; font-size: 1.1rem; margin: 1rem 0;">
     <strong>Shree Harsha Bokkahalli Satish, Gustav Eje Henter, Éva Székely</strong>
   </p>
-  
+
+  <!-- Study-platform contributors: our two names. Order alternates on every visit
+       (neither of us is consistently first); filled by the script in _includes/footer.html,
+       which sets this line and the footer to the same order. -->
+  <p style="color: #555; font-size: 1rem; margin: 0.25rem 0 0.75rem;">
+    <span id="contrib-names" style="opacity:0; transition:opacity 0.6s ease;">&nbsp;</span>
+    <br><span style="color:#999; font-size:0.75rem; font-style:italic;">‡ equal contribution</span>
+  </p>
+
   <!-- Affiliation with KTH Logo -->
   <div style="display: flex; align-items: center; justify-content: center; gap: 1rem; margin: 1rem 0;">
     <img src="{{ '/assets/KTH_Logo.jpg' | relative_url }}" alt="KTH Royal Institute of Technology" style="height: 40px; width: auto;">
     <p style="color: #666; margin: 0; font-style: italic;">KTH Royal Institute of Technology, Stockholm, Sweden</p>
   </div>
-
-  <!-- Study-platform contributors: two names STACKED, order randomized per visit
-       (Fisher–Yates, faded in after shuffle) so neither is consistently on top. -->
-  <div class="platform-contributors" style="margin: 1.25rem 0;">
-    <p style="color:#777; font-size:0.8rem; letter-spacing:0.12em; text-transform:uppercase; margin:0 0 0.4rem;">Study-platform contributors</p>
-    <div id="contrib-names" style="opacity:0; transition:opacity 0.7s ease;">
-      <p style="color:#333; font-size:1.15rem; font-weight:700; margin:0.1rem 0;">&nbsp;</p>
-      <p style="color:#333; font-size:1.15rem; font-weight:700; margin:0.1rem 0;">&nbsp;</p>
-    </div>
-    <p style="color:#999; font-size:0.75rem; font-style:italic; margin:0.4rem 0 0;">‡ equal contribution</p>
-  </div>
-  <script>
-    (function () {
-      var names = ["Syed Mohammad Fahim Abrar‡", "Felix Ölander‡"];
-      // Fisher–Yates: neither name is privileged with a fixed line.
-      for (var i = names.length - 1; i > 0; i--) {
-        var j = Math.floor(Math.random() * (i + 1));
-        var tmp = names[i]; names[i] = names[j]; names[j] = tmp;
-      }
-      var box = document.getElementById("contrib-names");
-      if (box) {
-        var lines = box.getElementsByTagName("p");
-        lines[0].textContent = names[0];
-        lines[1].textContent = names[1];
-        requestAnimationFrame(function () { box.style.opacity = "1"; });
-      }
-    })();
-  </script>
 
   <p><strong><a href="https://testing-moshi--hearmeout-web-dev.modal.run/" target="_blank">🎙️ Click here to try Hear Me Out Live (Under construction for now! Reach out for a preview!)</a></strong></p>
 </div>
@@ -122,6 +102,22 @@ bash infra/build-frontend.sh                 # only if the frontend changed
 </div>
 
 Through this immersive experience, we hope users will gain insights into identity, voice, and AI behavior. Ultimately, we aim to surface meaningful questions and inspire future research that promotes fairness and inclusivity with **Hear Me Out**.
+
+---
+
+## 🧪 **Study platform**
+
+Beyond the interactive demo, the same backend runs a **participant-study platform** for controlled voice-conditioning experiments. Set `APP_MODE=study` and `:5001` serves the study app (participant experiment + a token-gated admin dashboard) instead of the Chat/Convert/Metrics UI.
+
+```bash
+APP_MODE=study bash infra/build-frontend.sh
+APP_MODE=study bash infra/run_all.sh
+```
+
+- **Admin** manages studies: scenarios with **timed voice schedules** (natural ↔ converted), target voices, and questionnaires; generates participants with **counterbalanced, gender-conditional** condition assignment; runs analysis and export.
+- **Participant flow** (resumable, 1 hour): eligibility → consent → audio check → background → a practice scenario → counterbalanced analytical scenarios → questionnaires → converted-voice playback. The system prompt and voice schedule never reach the browser — the VC engine resolves them server-side.
+- **Voice conditions:** stable-natural, stable-converted, VC-activation (natural → converted mid-call), and VC-deactivation (converted → natural).
+- **Analysis** yields per-session technical-validity checks, a millisecond diarization timeline (overlaps, barge-ins), speech metrics, and objective VC-quality (WER, speaker similarity, UTMOS), all bundled by an export endpoint.
 
 ---
 

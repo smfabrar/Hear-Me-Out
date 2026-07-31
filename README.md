@@ -12,6 +12,7 @@ Try it live: https://testing-moshi--hearmeout-web-dev.modal.run/
 - [Architecture](#architecture)
 - [Setup](#setup)
 - [Running](#running)
+- [Study platform](#study-platform)
 - [Configuration](#configuration)
 - [Deploying a change](#deploying-a-change)
 
@@ -65,6 +66,39 @@ cd <workspace> && bash Hear-Me-Out/infra/run_all.sh
 ```
 
 `run_all.sh` auto-detects the workspace from its own location; override with `WORKSPACE=…`. It always serves the Vite build (`frontend/dist`, auto-built if missing). Set `VC_ENGINE=meanvc|xvc` to pick the voice-conversion engine on `:5002` (`xvc` requires the X-VC install from setup).
+
+## Study platform
+
+The same backend doubles as a **participant-study platform** for controlled voice-conditioning
+experiments. Set `APP_MODE=study` and `:5001` serves the study app (participant experiment +
+token-gated admin) instead of the HMO Chat/Convert/Metrics UI — the two are mutually exclusive.
+
+```bash
+APP_MODE=study bash infra/build-frontend.sh    # builds study-frontend/
+APP_MODE=study bash infra/run_all.sh           # or pick "2) Study platform" at the prompt
+```
+
+- **Admin** (token-gated) manages many studies: scenarios with **timed voice schedules** (natural /
+  VC, with mid-call switch points), engine-tagged **target voices**, and questionnaires. It
+  generates participants with **counterbalanced, gender-conditional** condition assignment, and runs
+  post-hoc **analysis** and **export**. Studies are authored in the UI or imported from YAML
+  (`services/app_api/study/templates/`).
+- **Participant flow** — resumable and time-limited (1 hour): eligibility → consent → audio check →
+  background → a **practice** scenario → the counterbalanced analytical scenarios (each followed by a
+  short questionnaire) → final questionnaire → converted-voice playback → debrief. The system prompt
+  and voice schedule **never reach the browser** — the VC engine resolves them server-side via
+  `GET /condition/{session_id}`, and the right engine is prepared on demand (restarting `:5002` when
+  a scenario needs a different one).
+- **Voice conditions** per scenario: `stable_natural`, `stable_converted`, `vc_activation`
+  (natural → converted mid-call), and `vc_deactivation` (converted → natural).
+- **Analysis** produces, per session: **technical-validity** checks (capture drops, routing/schedule
+  adherence, playback underruns), a **timing** timeline with millisecond diarization
+  (participant/assistant intervals, overlaps, barge-ins), speech/**preprocessing** metrics, and
+  objective **VC-quality** (WER, speaker similarity, UTMOS). `GET …/export` bundles every session's
+  audio + artifacts with a `study_export.json`. See [docs/study-data-pipeline.md](docs/study-data-pipeline.md).
+
+A **Soundboard** and a **VC-quality** service support reproducible stimulus delivery and post-hoc
+voice-quality scoring — see [SOUNDBOARD.md](SOUNDBOARD.md).
 
 ## Configuration
 
